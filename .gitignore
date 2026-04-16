@@ -30,3 +30,9 @@ release/**
 # Playwright
 test-results
 playwright-report/
+plan/
+
+# AI assistant folders (not for public repo)
+.claude/
+.aider/
+.cursor/
