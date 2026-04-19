@@ -34,8 +34,10 @@ import {
 } from "@/utils/aspectRatioUtils";
 import { AnnotationOverlay } from "./AnnotationOverlay";
 import {
+	type AnnotationKeyframe,
 	type AnnotationRegion,
 	type BlurData,
+	type ClipRegion,
 	type SpeedRegion,
 	type TrimRegion,
 	ZOOM_DEPTH_SCALES,
@@ -43,6 +45,7 @@ import {
 	type ZoomFocus,
 	type ZoomRegion,
 } from "./types";
+import { toFileUrl } from "./projectPersistence";
 import {
 	AUTO_FOLLOW_RAMP_DISTANCE,
 	AUTO_FOLLOW_SMOOTHING_FACTOR,
@@ -109,7 +112,13 @@ interface VideoPlaybackProps {
 	onBlurSizeChange?: (id: string, size: { width: number; height: number }) => void;
 	onBlurDataChange?: (id: string, blurData: BlurData) => void;
 	onBlurDataCommit?: () => void;
+	onDrawingUpdate?: (id: string, pathPoints: Array<{ x: number; y: number }>) => void;
 	cursorTelemetry?: import("./types").CursorTelemetryPoint[];
+	clipRegions?: ClipRegion[];
+	faceBlurEnabled?: boolean;
+	bgRemovalEnabled?: boolean;
+	onAddKeyframe?: (id: string, keyframe: AnnotationKeyframe) => void;
+	onKeyframePositionChange?: (id: string, keyframeIndex: number, position: { x: number; y: number }) => void;
 }
 
 export interface VideoPlaybackRef {
@@ -167,7 +176,13 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			onBlurSizeChange,
 			onBlurDataChange,
 			onBlurDataCommit,
+			onDrawingUpdate,
 			cursorTelemetry = [],
+			clipRegions = [],
+			faceBlurEnabled = false,
+			bgRemovalEnabled = false,
+			onAddKeyframe,
+			onKeyframePositionChange,
 		},
 		ref,
 	) => {
@@ -185,9 +200,16 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 		const [overlayElement, setOverlayElement] = useState<HTMLDivElement | null>(null);
 		const overlayRef = useRef<HTMLDivElement | null>(null);
 		const focusIndicatorRef = useRef<HTMLDivElement | null>(null);
+		const faceBlurCanvasRef = useRef<HTMLCanvasElement | null>(null);
+		const bgRemovalCanvasRef = useRef<HTMLCanvasElement | null>(null);
+		const blazeFaceModelRef = useRef<unknown>(null);
+		const bodyPixModelRef = useRef<unknown>(null);
 		const [webcamLayout, setWebcamLayout] = useState<StyledRenderRect | null>(null);
 		const [webcamDimensions, setWebcamDimensions] = useState<Size | null>(null);
 		const currentTimeRef = useRef(0);
+		const clipRegionsRef = useRef<ClipRegion[]>(clipRegions);
+		const activeClipIndexRef = useRef(0);
+		const clipTimeOffsetRef = useRef(0);
 		const zoomRegionsRef = useRef<ZoomRegion[]>([]);
 		const cursorTelemetryRef = useRef<import("./types").CursorTelemetryPoint[]>([]);
 		const selectedZoomIdRef = useRef<string | null>(null);
@@ -540,6 +562,10 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 		}, [onPlayStateChange]);
 
 		useEffect(() => {
+			clipRegionsRef.current = [...clipRegions].sort((a, b) => a.startMs - b.startMs);
+		}, [clipRegions]);
+
+		useEffect(() => {
 			if (!pixiReady || !videoReady) return;
 
 			const app = appRef.current;
@@ -824,21 +850,40 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 				currentTimeRef,
 				timeUpdateAnimationRef,
 				onPlayStateChange: (playing) => onPlayStateChangeRef.current(playing),
-				onTimeUpdate: (time) => onTimeUpdateRef.current(time),
+				onTimeUpdate: (time) => onTimeUpdateRef.current(time + clipTimeOffsetRef.current),
 				trimRegionsRef,
 				speedRegionsRef,
+				clipTimeOffsetRef,
 			});
+
+			const handleClipEnded = () => {
+				const clips = clipRegionsRef.current;
+				const nextIdx = activeClipIndexRef.current + 1;
+				if (nextIdx < clips.length) {
+					const nextClip = clips[nextIdx];
+					activeClipIndexRef.current = nextIdx;
+					clipTimeOffsetRef.current = (nextClip.startMs - nextClip.sourceOffsetMs) / 1000;
+					video.src = toFileUrl(nextClip.sourcePath);
+					video.load();
+					video.addEventListener("loadedmetadata", () => {
+						video.currentTime = nextClip.sourceOffsetMs / 1000;
+						if (isPlayingRef.current) video.play().catch(() => {});
+					}, { once: true });
+				} else {
+					handlePause();
+				}
+			};
 
 			video.addEventListener("play", handlePlay);
 			video.addEventListener("pause", handlePause);
-			video.addEventListener("ended", handlePause);
+			video.addEventListener("ended", handleClipEnded);
 			video.addEventListener("seeked", handleSeeked);
 			video.addEventListener("seeking", handleSeeking);
 
 			return () => {
 				video.removeEventListener("play", handlePlay);
 				video.removeEventListener("pause", handlePause);
-				video.removeEventListener("ended", handlePause);
+				video.removeEventListener("ended", handleClipEnded);
 				video.removeEventListener("seeked", handleSeeked);
 				video.removeEventListener("seeking", handleSeeking);
 
@@ -1080,6 +1125,40 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 				}
 			};
 		}, [pixiReady, videoReady]);
+
+		useEffect(() => {
+			if (!faceBlurEnabled) return;
+			let cancelled = false;
+			(async () => {
+				try {
+					const dynamicImport = Function("specifier", "return import(specifier)") as (s: string) => Promise<unknown>;
+					await dynamicImport("@tensorflow/tfjs");
+					if (cancelled) return;
+					const blazeface = await dynamicImport("@tensorflow-models/blazeface") as { load: () => Promise<unknown> };
+					blazeFaceModelRef.current = await blazeface.load();
+				} catch {
+					// blazeface not available — feature silently no-ops
+				}
+			})();
+			return () => { cancelled = true; };
+		}, [faceBlurEnabled]);
+
+		useEffect(() => {
+			if (!bgRemovalEnabled) return;
+			let cancelled = false;
+			(async () => {
+				try {
+					const dynamicImport = Function("specifier", "return import(specifier)") as (s: string) => Promise<unknown>;
+					await dynamicImport("@tensorflow/tfjs");
+					if (cancelled) return;
+					const bodyPix = await dynamicImport("@tensorflow-models/body-pix") as { load: (cfg: object) => Promise<unknown> };
+					bodyPixModelRef.current = await bodyPix.load({ architecture: "MobileNetV1", outputStride: 16, multiplier: 0.75, quantBytes: 2 });
+				} catch {
+					// bodypix not available — feature silently no-ops
+				}
+			})();
+			return () => { cancelled = true; };
+		}, [bgRemovalEnabled]);
 
 		const handleLoadedMetadata = (e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
 			const video = e.currentTarget;
@@ -1440,6 +1519,10 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 											: undefined
 									}
 									onBlurDataCommit={item.kind === "blur" ? onBlurDataCommit : undefined}
+									onDrawingUpdate={item.kind !== "blur" && item.region.type === "drawing" ? onDrawingUpdate : undefined}
+									onAddKeyframe={item.kind !== "blur" ? onAddKeyframe : undefined}
+									onKeyframePositionChange={item.kind !== "blur" ? onKeyframePositionChange : undefined}
+									currentTimeMs={currentTime * 1000}
 									onClick={item.kind === "blur" ? handleBlurClick : handleAnnotationClick}
 									zIndex={item.region.zIndex}
 									isSelectedBoost={
@@ -1453,6 +1536,20 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 							));
 						})()}
 					</div>
+				)}
+				{faceBlurEnabled && (
+					<canvas
+						ref={faceBlurCanvasRef}
+						className="absolute inset-0 pointer-events-none"
+						style={{ width: "100%", height: "100%", opacity: 0.9 }}
+					/>
+				)}
+				{bgRemovalEnabled && (
+					<canvas
+						ref={bgRemovalCanvasRef}
+						className="absolute inset-0 pointer-events-none"
+						style={{ width: "100%", height: "100%", mixBlendMode: "multiply" }}
+					/>
 				)}
 				<video
 					ref={videoRef}

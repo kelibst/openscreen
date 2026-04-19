@@ -67,6 +67,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	openVideoFilePicker: () => {
 		return ipcRenderer.invoke("open-video-file-picker");
 	},
+	openAudioFilePicker: () => {
+		return ipcRenderer.invoke("open-audio-file-picker");
+	},
+	openImageFilePicker: () => {
+		return ipcRenderer.invoke("open-image-file-picker");
+	},
 	setCurrentVideoPath: (path: string) => {
 		return ipcRenderer.invoke("set-current-video-path", path);
 	},
@@ -123,6 +129,38 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	},
 	setLocale: (locale: string) => {
 		return ipcRenderer.invoke("set-locale", locale);
+	},
+	transcribeAudio: (sourcePath: string) => {
+		return ipcRenderer.invoke("transcribe-audio", { sourcePath });
+	},
+	saveTempAudio: (data: ArrayBuffer, fileName: string) => {
+		return ipcRenderer.invoke("save-temp-audio", { data, fileName });
+	},
+	extractAudio: (sourcePath: string) => {
+		return ipcRenderer.invoke("extract-audio", { sourcePath });
+	},
+	extractThumbnails: (args: { sourcePath: string; count: number }) => {
+		return ipcRenderer.invoke("extract-thumbnails", args);
+	},
+	getRecentFiles: () => {
+		return ipcRenderer.invoke("get-recent-files");
+	},
+	addRecentFile: (entry: { path: string; name: string; lastOpened: number }) => {
+		return ipcRenderer.invoke("add-recent-file", entry);
+	},
+	clearRecentFiles: () => {
+		return ipcRenderer.invoke("clear-recent-files");
+	},
+	openHomeWindow: () => {
+		return ipcRenderer.invoke("open-home-window");
+	},
+	openEditorFromFile: (filePath: string) => {
+		return ipcRenderer.invoke("open-editor-from-file", filePath);
+	},
+	onOpenFileInEditor: (callback: (filePath: string) => void) => {
+		const listener = (_: Electron.IpcRendererEvent, filePath: string) => callback(filePath);
+		ipcRenderer.on("open-file-in-editor", listener);
+		return () => ipcRenderer.removeListener("open-file-in-editor", listener);
 	},
 	setMicrophoneExpanded: (expanded: boolean) => {
 		ipcRenderer.send("hud:setMicrophoneExpanded", expanded);

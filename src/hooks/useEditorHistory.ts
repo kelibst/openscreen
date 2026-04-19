@@ -1,6 +1,9 @@
 import { useCallback, useRef, useState } from "react";
 import type {
 	AnnotationRegion,
+	AudioRegion,
+	ClipRegion,
+	ColorGrading,
 	CropRegion,
 	SpeedRegion,
 	TrimRegion,
@@ -26,6 +29,8 @@ export interface EditorState {
 	trimRegions: TrimRegion[];
 	speedRegions: SpeedRegion[];
 	annotationRegions: AnnotationRegion[];
+	audioRegions: AudioRegion[];
+	clipRegions: ClipRegion[];
 	cropRegion: CropRegion;
 	wallpaper: string;
 	shadowIntensity: number;
@@ -38,6 +43,12 @@ export interface EditorState {
 	webcamMaskShape: WebcamMaskShape;
 	webcamSizePreset: WebcamSizePreset;
 	webcamPosition: WebcamPosition | null;
+	colorGrading?: ColorGrading;
+	faceBlurEnabled?: boolean;
+	bgRemovalEnabled?: boolean;
+	primaryAudioVolume: number;
+	primaryAudioMuted: boolean;
+	trackState: Record<string, { muted: boolean; locked: boolean; label: string }>;
 }
 
 export const INITIAL_EDITOR_STATE: EditorState = {
@@ -45,6 +56,8 @@ export const INITIAL_EDITOR_STATE: EditorState = {
 	trimRegions: [],
 	speedRegions: [],
 	annotationRegions: [],
+	audioRegions: [],
+	clipRegions: [],
 	cropRegion: DEFAULT_CROP_REGION,
 	wallpaper: "/wallpapers/wallpaper1.jpg",
 	shadowIntensity: 0,
@@ -57,6 +70,18 @@ export const INITIAL_EDITOR_STATE: EditorState = {
 	webcamMaskShape: DEFAULT_WEBCAM_MASK_SHAPE,
 	webcamSizePreset: DEFAULT_WEBCAM_SIZE_PRESET,
 	webcamPosition: DEFAULT_WEBCAM_POSITION,
+	primaryAudioVolume: 1.0,
+	primaryAudioMuted: false,
+	trackState: {
+		"row-overlay": { muted: false, locked: false, label: "Overlay" },
+		"row-clip": { muted: false, locked: false, label: "Video" },
+		"row-audio-0": { muted: false, locked: false, label: "Audio 1" },
+		"row-audio-1": { muted: false, locked: false, label: "Audio 2" },
+		"row-audio-2": { muted: false, locked: false, label: "Audio 3" },
+		"row-audio-3": { muted: false, locked: false, label: "Audio 4" },
+		"row-effects": { muted: false, locked: false, label: "Effects" },
+		"row-trim": { muted: false, locked: false, label: "Trim" },
+	},
 };
 
 type StateUpdate = Partial<EditorState> | ((prev: EditorState) => Partial<EditorState>);

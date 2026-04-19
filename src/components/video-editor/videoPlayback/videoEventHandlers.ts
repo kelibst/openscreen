@@ -12,6 +12,7 @@ interface VideoEventHandlersParams {
 	onTimeUpdate: (time: number) => void;
 	trimRegionsRef: React.MutableRefObject<TrimRegion[]>;
 	speedRegionsRef: React.MutableRefObject<SpeedRegion[]>;
+	clipTimeOffsetRef: React.MutableRefObject<number>;
 }
 
 export function createVideoEventHandlers(params: VideoEventHandlersParams) {
@@ -26,6 +27,7 @@ export function createVideoEventHandlers(params: VideoEventHandlersParams) {
 		onTimeUpdate,
 		trimRegionsRef,
 		speedRegionsRef,
+		clipTimeOffsetRef,
 	} = params;
 
 	const emitTime = (timeValue: number) => {
@@ -33,12 +35,15 @@ export function createVideoEventHandlers(params: VideoEventHandlersParams) {
 		onTimeUpdate(timeValue);
 	};
 
-	// Helper function to check if current time is within a trim region
+	// Helper function to check if current time is within a trim region.
+	// Trim regions are in global timeline ms; video.currentTime is source-local,
+	// so add clipTimeOffsetRef (seconds → ms) to convert to global space.
 	const findActiveTrimRegion = (currentTimeMs: number): TrimRegion | null => {
 		const trimRegions = trimRegionsRef.current;
+		const globalTimeMs = currentTimeMs + clipTimeOffsetRef.current * 1000;
 		return (
 			trimRegions.find(
-				(region) => currentTimeMs >= region.startMs && currentTimeMs < region.endMs,
+				(region) => globalTimeMs >= region.startMs && globalTimeMs < region.endMs,
 			) || null
 		);
 	};
@@ -58,9 +63,10 @@ export function createVideoEventHandlers(params: VideoEventHandlersParams) {
 		const currentTimeMs = video.currentTime * 1000;
 		const activeTrimRegion = findActiveTrimRegion(currentTimeMs);
 
-		// If we're in a trim region during playback, skip to the end of it
+		// If we're in a trim region during playback, skip to the end of it.
+		// activeTrimRegion.endMs is in global timeline ms; convert to source-local seconds.
 		if (activeTrimRegion && !video.paused && !video.ended) {
-			const skipToTime = activeTrimRegion.endMs / 1000;
+			const skipToTime = activeTrimRegion.endMs / 1000 - clipTimeOffsetRef.current;
 
 			// If the skip would take us past the video duration, pause instead
 			if (skipToTime >= video.duration) {
@@ -116,9 +122,10 @@ export function createVideoEventHandlers(params: VideoEventHandlersParams) {
 		const currentTimeMs = video.currentTime * 1000;
 		const activeTrimRegion = findActiveTrimRegion(currentTimeMs);
 
-		// If we seeked into a trim region while playing, skip to the end
+		// If we seeked into a trim region while playing, skip to the end.
+		// activeTrimRegion.endMs is in global timeline ms; convert to source-local seconds.
 		if (activeTrimRegion && isPlayingRef.current && !video.paused) {
-			const skipToTime = activeTrimRegion.endMs / 1000;
+			const skipToTime = activeTrimRegion.endMs / 1000 - clipTimeOffsetRef.current;
 
 			if (skipToTime >= video.duration) {
 				video.pause();

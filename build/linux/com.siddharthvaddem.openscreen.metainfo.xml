@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.siddharthvaddem.openscreen</id>
+
+  <name>OpenScreen</name>
+  <name xml:lang="zh-CN">OpenScreen 录屏</name>
+  <summary>Record your screen and create professional demos</summary>
+  <summary xml:lang="zh-CN">录制屏幕并制作专业演示视频</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>
+      OpenScreen is a free and open-source screen recorder and video editor,
+      designed as a simplified alternative to Screen Studio. It lets you record
+      your screen with automatic zoom effects, webcam overlays, and annotations,
+      then export polished product demos and walkthroughs.
+    </p>
+    <p>Key features:</p>
+    <ul>
+      <li>Screen recording with microphone and system audio</li>
+      <li>Automatic and manual zoom effects</li>
+      <li>Webcam overlay with customisable mask shapes</li>
+      <li>Timeline editor with speed control and trim</li>
+      <li>Text, arrow, and image annotations</li>
+      <li>Motion blur for smooth transitions</li>
+      <li>Export to MP4, WebM, or GIF</li>
+      <li>Multiple aspect ratios and background options</li>
+    </ul>
+    <p xml:lang="zh-CN">
+      OpenScreen 是一款免费开源的录屏与视频编辑工具，支持自动缩放、摄像头叠加、
+      文字标注等功能，可导出 MP4、WebM 或 GIF 格式。
+    </p>
+  </description>
+
+  <launchable type="desktop-id">openscreen.desktop</launchable>
+
+  <url type="homepage">https://github.com/siddharthvaddem/openscreen</url>
+  <url type="bugtracker">https://github.com/siddharthvaddem/openscreen/issues</url>
+
+  <developer id="com.siddharthvaddem">
+    <name>Siddharth Vaddem</name>
+  </developer>
+
+  <provides>
+    <binary>openscreen</binary>
+  </provides>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+    <category>Recorder</category>
+  </categories>
+
+  <keywords>
+    <keyword>screen</keyword>
+    <keyword>record</keyword>
+    <keyword>capture</keyword>
+    <keyword>demo</keyword>
+    <keyword>video</keyword>
+    <keyword>editor</keyword>
+    <keyword>zoom</keyword>
+    <keyword xml:lang="zh-CN">录屏</keyword>
+    <keyword xml:lang="zh-CN">视频</keyword>
+  </keywords>
+
+  <releases>
+    <release version="1.3.0" date="2024-01-01">
+      <description>
+        <p>Latest stable release with auto-follow zoom and webcam mask shapes.</p>
+      </description>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1" />
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+</component>

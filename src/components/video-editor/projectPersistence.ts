@@ -5,7 +5,11 @@ import { normalizeProjectMedia } from "@/lib/recordingSession";
 import { ASPECT_RATIOS, type AspectRatio, isPortraitAspectRatio } from "@/utils/aspectRatioUtils";
 import {
 	type AnnotationRegion,
+	type AudioRegion,
+	type ClipRegion,
+	type ColorGrading,
 	type CropRegion,
+	DEFAULT_AUDIO_VOLUME,
 	clampPlaybackSpeed,
 	DEFAULT_ANNOTATION_POSITION,
 	DEFAULT_ANNOTATION_SIZE,
@@ -45,7 +49,7 @@ export const WALLPAPER_PATHS = Array.from(
 	(_, i) => `/wallpapers/wallpaper${i + 1}.jpg`,
 );
 
-export const PROJECT_VERSION = 2;
+export const PROJECT_VERSION = 3;
 
 export interface ProjectEditorState {
 	wallpaper: string;
@@ -59,6 +63,14 @@ export interface ProjectEditorState {
 	trimRegions: TrimRegion[];
 	speedRegions: SpeedRegion[];
 	annotationRegions: AnnotationRegion[];
+	audioRegions: AudioRegion[];
+	clipRegions: ClipRegion[];
+	colorGrading?: ColorGrading;
+	faceBlurEnabled?: boolean;
+	bgRemovalEnabled?: boolean;
+	primaryAudioVolume?: number;
+	primaryAudioMuted?: boolean;
+	trackState?: Record<string, { muted: boolean; locked: boolean; label: string }>;
 	aspectRatio: AspectRatio;
 	webcamLayoutPreset: WebcamLayoutPreset;
 	webcamMaskShape: WebcamMaskShape;
@@ -317,7 +329,7 @@ export function normalizeProjectEditor(editor: Partial<ProjectEditorState>): Pro
 						startMs,
 						endMs,
 						type:
-							region.type === "image" || region.type === "figure" || region.type === "blur"
+							region.type === "image" || region.type === "figure" || region.type === "blur" || region.type === "gif" || region.type === "drawing"
 								? region.type
 								: "text",
 						content: typeof region.content === "string" ? region.content : "",
@@ -402,8 +414,85 @@ export function normalizeProjectEditor(editor: Partial<ProjectEditorState>): Pro
 											: DEFAULT_BLUR_FREEHAND_POINTS,
 									}
 								: undefined,
+						imageFullFrame: typeof region.imageFullFrame === "boolean" ? region.imageFullFrame : undefined,
+						imageFit: region.imageFit === "cover" || region.imageFit === "contain" || region.imageFit === "fill" ? region.imageFit : undefined,
+						textAnimation: region.textAnimation ?? undefined,
+						gifFrames: Array.isArray(region.gifFrames) ? region.gifFrames : undefined,
+						pathPoints: Array.isArray(region.pathPoints) ? region.pathPoints : undefined,
+						strokeColor: typeof region.strokeColor === "string" ? region.strokeColor : undefined,
+						strokeWidth: isFiniteNumber(region.strokeWidth) ? region.strokeWidth : undefined,
+						keyframes: Array.isArray(region.keyframes) ? region.keyframes : undefined,
+						wordTimings: Array.isArray(region.wordTimings) ? region.wordTimings : undefined,
+						isSubtitle: typeof region.isSubtitle === "boolean" ? region.isSubtitle : undefined,
 					};
 				})
+		: [];
+
+	const normalizedAudioRegions: AudioRegion[] = Array.isArray(
+		(editor as { audioRegions?: unknown }).audioRegions,
+	)
+		? (editor as { audioRegions: unknown[] }).audioRegions
+				.filter((r): r is AudioRegion => Boolean(r && typeof (r as AudioRegion).id === "string"))
+				.map((region) => {
+					const rawStart = isFiniteNumber(region.startMs) ? Math.round(region.startMs) : 0;
+					const rawEnd = isFiniteNumber(region.endMs) ? Math.round(region.endMs) : rawStart + 1000;
+					const startMs = Math.max(0, Math.min(rawStart, rawEnd));
+					const endMs = Math.max(startMs + 1, rawEnd);
+					return {
+						id: region.id,
+						startMs,
+						endMs,
+						sourceOffsetMs: isFiniteNumber(region.sourceOffsetMs)
+							? Math.max(0, region.sourceOffsetMs)
+							: 0,
+						sourcePath: typeof region.sourcePath === "string" ? region.sourcePath : "",
+						volume: isFiniteNumber(region.volume) ? clamp(region.volume, 0, 1) : DEFAULT_AUDIO_VOLUME,
+						label: typeof region.label === "string" ? region.label : undefined,
+						equalizer: region.equalizer && typeof region.equalizer === "object"
+							? {
+									low: isFiniteNumber((region.equalizer as { low?: unknown }).low) ? clamp((region.equalizer as { low: number }).low, -12, 12) : 0,
+									mid: isFiniteNumber((region.equalizer as { mid?: unknown }).mid) ? clamp((region.equalizer as { mid: number }).mid, -12, 12) : 0,
+									high: isFiniteNumber((region.equalizer as { high?: unknown }).high) ? clamp((region.equalizer as { high: number }).high, -12, 12) : 0,
+								}
+							: undefined,
+						fadeInMs: isFiniteNumber((region as { fadeInMs?: unknown }).fadeInMs)
+							? Math.max(0, (region as { fadeInMs: number }).fadeInMs)
+							: 0,
+						fadeOutMs: isFiniteNumber((region as { fadeOutMs?: unknown }).fadeOutMs)
+							? Math.max(0, (region as { fadeOutMs: number }).fadeOutMs)
+							: 0,
+						trackIndex: ([0, 1, 2, 3] as const).includes((region as { trackIndex?: unknown }).trackIndex as 0 | 1 | 2 | 3)
+							? (region as { trackIndex: 0 | 1 | 2 | 3 }).trackIndex
+							: 0,
+					};
+				})
+				.filter((r) => r.sourcePath !== "")
+		: [];
+
+	const normalizedClipRegions: ClipRegion[] = Array.isArray(
+		(editor as { clipRegions?: unknown }).clipRegions,
+	)
+		? (editor as { clipRegions: unknown[] }).clipRegions
+				.filter((r): r is ClipRegion => Boolean(r && typeof (r as ClipRegion).id === "string"))
+				.map((region) => {
+					const rawStart = isFiniteNumber(region.startMs) ? Math.round(region.startMs) : 0;
+					const rawEnd = isFiniteNumber(region.endMs) ? Math.round(region.endMs) : rawStart + 1000;
+					const startMs = Math.max(0, Math.min(rawStart, rawEnd));
+					const endMs = Math.max(startMs + 1, rawEnd);
+					return {
+						id: region.id,
+						startMs,
+						endMs,
+						sourceOffsetMs: isFiniteNumber(region.sourceOffsetMs)
+							? Math.max(0, region.sourceOffsetMs)
+							: 0,
+						sourcePath: typeof region.sourcePath === "string" ? region.sourcePath : "",
+						label: typeof region.label === "string" ? region.label : undefined,
+						loop: typeof region.loop === "boolean" ? region.loop : false,
+						audioMuted: typeof region.audioMuted === "boolean" ? region.audioMuted : false,
+					};
+				})
+				.filter((r) => r.sourcePath !== "")
 		: [];
 
 	const rawCropX = isFiniteNumber(editor.cropRegion?.x)
@@ -447,6 +536,25 @@ export function normalizeProjectEditor(editor: Partial<ProjectEditorState>): Pro
 		trimRegions: normalizedTrimRegions,
 		speedRegions: normalizedSpeedRegions,
 		annotationRegions: normalizedAnnotationRegions,
+		audioRegions: normalizedAudioRegions,
+		clipRegions: normalizedClipRegions,
+		colorGrading: (editor as { colorGrading?: ColorGrading }).colorGrading ?? undefined,
+		faceBlurEnabled: typeof (editor as { faceBlurEnabled?: unknown }).faceBlurEnabled === "boolean"
+			? (editor as { faceBlurEnabled: boolean }).faceBlurEnabled
+			: undefined,
+		bgRemovalEnabled: typeof (editor as { bgRemovalEnabled?: unknown }).bgRemovalEnabled === "boolean"
+			? (editor as { bgRemovalEnabled: boolean }).bgRemovalEnabled
+			: undefined,
+		primaryAudioVolume: isFiniteNumber((editor as { primaryAudioVolume?: unknown }).primaryAudioVolume)
+			? clamp((editor as { primaryAudioVolume: number }).primaryAudioVolume, 0, 1)
+			: 1.0,
+		primaryAudioMuted: typeof (editor as { primaryAudioMuted?: unknown }).primaryAudioMuted === "boolean"
+			? (editor as { primaryAudioMuted: boolean }).primaryAudioMuted
+			: false,
+		trackState: (editor as { trackState?: unknown }).trackState &&
+			typeof (editor as { trackState?: unknown }).trackState === "object"
+			? (editor as { trackState: Record<string, { muted: boolean; locked: boolean; label: string }> }).trackState
+			: undefined,
 		aspectRatio: normalizedAspectRatio,
 		webcamLayoutPreset: normalizedWebcamLayoutPreset,
 		webcamMaskShape:

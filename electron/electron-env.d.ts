@@ -77,6 +77,8 @@ interface Window {
 			fileName: string,
 		) => Promise<{ success: boolean; path?: string; message?: string; canceled?: boolean }>;
 		openVideoFilePicker: () => Promise<{ success: boolean; path?: string; canceled?: boolean }>;
+		openAudioFilePicker: () => Promise<{ success: boolean; path?: string; canceled?: boolean }>;
+		openImageFilePicker: () => Promise<{ success: boolean; path?: string; canceled?: boolean }>;
 		setCurrentVideoPath: (path: string) => Promise<{ success: boolean }>;
 		setCurrentRecordingSession: (
 			session: import("../src/lib/recordingSession").RecordingSession | null,
@@ -139,6 +141,40 @@ interface Window {
 		setHasUnsavedChanges: (hasChanges: boolean) => void;
 		onRequestSaveBeforeClose: (callback: () => Promise<boolean> | boolean) => () => void;
 		setLocale: (locale: string) => Promise<void>;
+		transcribeAudio: (sourcePath: string) => Promise<{
+			success: boolean;
+			segments?: Array<{
+				start: number;
+				end: number;
+				text: string;
+				words?: Array<{ word: string; start: number; end: number }>;
+			}>;
+			error?: string;
+		}>;
+		saveTempAudio: (data: ArrayBuffer, fileName: string) => Promise<{
+			success: boolean;
+			outputPath?: string;
+			error?: string;
+		}>;
+		extractAudio: (sourcePath: string) => Promise<{
+			success: boolean;
+			outputPath?: string;
+			error?: string;
+		}>;
+		extractThumbnails: (args: {
+			sourcePath: string;
+			count: number;
+		}) => Promise<{ success: boolean; frames?: string[]; error?: string }>;
+		getRecentFiles: () => Promise<Array<{ path: string; name: string; lastOpened: number }>>;
+		addRecentFile: (entry: {
+			path: string;
+			name: string;
+			lastOpened: number;
+		}) => Promise<{ success: boolean; error?: string }>;
+		clearRecentFiles: () => Promise<{ success: boolean; error?: string }>;
+		openHomeWindow: () => Promise<void>;
+		openEditorFromFile: (filePath: string) => Promise<void>;
+		onOpenFileInEditor: (callback: (filePath: string) => void) => () => void;
 	};
 }
 

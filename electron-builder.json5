@@ -26,6 +26,26 @@
       "to": "assets/wallpapers"
     }
   ],
+  "extraFiles": [
+    {
+      "from": "build/linux/com.siddharthvaddem.openscreen.metainfo.xml",
+      "to": "usr/share/metainfo/com.siddharthvaddem.openscreen.metainfo.xml",
+      "filter": ["**/*"]
+    }
+  ],
+
+  "fileAssociations": [
+    {
+      "ext": "openscreen",
+      "name": "OpenScreen Project",
+      "role": "Editor"
+    },
+    {
+      "ext": ["mp4", "mov", "webm", "avi", "mkv"],
+      "name": "Video File",
+      "role": "Viewer"
+    }
+  ],
 
   "mac": {
     "notarize": false,
@@ -50,11 +70,26 @@
   },
   "linux": {
     "target": [
-      "AppImage"
+      "AppImage",
+      "deb"
     ],
     "icon": "icons/icons/png",
     "artifactName": "${productName}-Linux-${version}.${ext}",
-    "category": "AudioVideo"
+    "category": "AudioVideo",
+    "desktop": {
+      "entry": {
+        "GenericName": "Screen Recorder",
+        "Comment": "Record your screen and create professional demos",
+        "Categories": "AudioVideo;Video;Recorder;",
+        "Keywords": "screen;record;demo;capture;video;",
+        "StartupWMClass": "Openscreen"
+      }
+    }
+  },
+  "deb": {
+    "packageCategory": "video",
+    "priority": "optional",
+    "depends": ["libayatana-appindicator3-1"]
   },
   "win": {
     "target": [

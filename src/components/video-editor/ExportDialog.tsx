@@ -11,7 +11,7 @@ interface ExportDialogProps {
 	isExporting: boolean;
 	error: string | null;
 	onCancel?: () => void;
-	exportFormat?: "mp4" | "gif";
+	exportFormat?: "mp4" | "gif" | "webm";
 	exportedFilePath?: string;
 	onShowInFolder?: () => void;
 }
@@ -23,7 +23,7 @@ export function ExportDialog({
 	isExporting,
 	error,
 	onCancel,
-	exportFormat = "mp4",
+	exportFormat = "mp4" as "mp4" | "gif" | "webm",
 	exportedFilePath,
 	onShowInFolder,
 }: ExportDialogProps) {

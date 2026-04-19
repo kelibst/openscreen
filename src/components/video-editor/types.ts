@@ -49,7 +49,7 @@ export interface TrimRegion {
 	endMs: number;
 }
 
-export type AnnotationType = "text" | "image" | "figure" | "blur";
+export type AnnotationType = "text" | "image" | "figure" | "blur" | "gif" | "drawing";
 
 export type ArrowDirection =
 	| "up"
@@ -109,6 +109,15 @@ export interface AnnotationTextStyle {
 	textAlign: "left" | "center" | "right";
 }
 
+export interface AnnotationKeyframe {
+	timeMs: number;
+	properties: {
+		position?: AnnotationPosition;
+		size?: AnnotationSize;
+		style?: Partial<AnnotationTextStyle>;
+	};
+}
+
 export interface AnnotationRegion {
 	id: string;
 	startMs: number;
@@ -123,6 +132,26 @@ export interface AnnotationRegion {
 	zIndex: number;
 	figureData?: FigureData;
 	blurData?: BlurData;
+	// Image options
+	imageFullFrame?: boolean;
+	imageFit?: "cover" | "contain" | "fill";
+	// Text animation
+	textAnimation?: TextAnimation;
+	textOutlineColor?: string;
+	textOutlineWidth?: number;
+	letterSpacing?: number;
+	lineHeight?: number;
+	// GIF animation frames
+	gifFrames?: Array<{ dataUrl: string; delayMs: number }>;
+	// Drawing/pen tool
+	pathPoints?: Array<{ x: number; y: number }>;
+	strokeColor?: string;
+	strokeWidth?: number;
+	// Keyframe animation (P2-1 / P4-7)
+	keyframes?: AnnotationKeyframe[];
+	// Karaoke word timings (P4-8)
+	wordTimings?: Array<{ word: string; startMs: number; endMs: number }>;
+	isSubtitle?: boolean;
 }
 
 export const DEFAULT_ANNOTATION_POSITION: AnnotationPosition = {
@@ -230,6 +259,109 @@ export const ZOOM_DEPTH_SCALES: Record<ZoomDepth, number> = {
 };
 
 export const DEFAULT_ZOOM_DEPTH: ZoomDepth = 3;
+
+// ── Audio regions ───────────────────────────────────────────────────────────
+
+export interface AudioEqualizer {
+	low: number;   // -12 to +12 dB, 200 Hz lowshelf
+	mid: number;   // -12 to +12 dB, 1000 Hz peaking
+	high: number;  // -12 to +12 dB, 4000 Hz highshelf
+}
+
+export interface AudioRegion {
+	id: string;
+	startMs: number;
+	endMs: number;
+	/** Trim-in point within the source file (ms). */
+	sourceOffsetMs: number;
+	/** Absolute filesystem path to the audio file. */
+	sourcePath: string;
+	/** 0.0 – 1.0 */
+	volume: number;
+	label?: string;
+	equalizer?: AudioEqualizer;
+	/** Fade-in duration in ms (0 = no fade). */
+	fadeInMs?: number;
+	/** Fade-out duration in ms (0 = no fade). */
+	fadeOutMs?: number;
+	/** Which audio track row this region lives on. Auto-assigned; grows dynamically. */
+	trackIndex?: number;
+}
+
+export const DEFAULT_AUDIO_VOLUME = 0.8;
+
+// ── Clip regions ────────────────────────────────────────────────────────────
+
+export type TransitionType = "cut" | "fade" | "dissolve" | "wipe-left" | "wipe-right" | "slide-left";
+
+export interface ClipRegion {
+	id: string;
+	startMs: number;
+	endMs: number;
+	/** Trim-in point within the source file (ms). */
+	sourceOffsetMs: number;
+	/** Absolute filesystem path to the video file. */
+	sourcePath: string;
+	label?: string;
+	transitionIn?: TransitionType;
+	transitionInDurationMs?: number;
+	loop?: boolean;
+	audioMuted?: boolean;
+}
+
+// ── Text animations ──────────────────────────────────────────────────────────
+
+export type TextAnimationPreset =
+	| "none"
+	| "fade-in"
+	| "fade-out"
+	| "fade-in-out"
+	| "slide-up"
+	| "slide-down"
+	| "slide-left"
+	| "slide-right"
+	| "typewriter"
+	| "scale-in"
+	| "bounce-in";
+
+export interface TextAnimation {
+	preset: TextAnimationPreset;
+	/** Animation duration in ms (from start/end of the region). */
+	durationMs: number;
+}
+
+// ── Color grading ────────────────────────────────────────────────────────────
+
+export type ColorGradingPreset =
+	| "none"
+	| "vivid"
+	| "matte"
+	| "cinematic"
+	| "warm"
+	| "cool"
+	| "vintage"
+	| "noir";
+
+export interface CurvePoint {
+	x: number; // 0-1 input
+	y: number; // 0-1 output
+}
+
+export interface RgbCurves {
+	rgb: CurvePoint[];
+	r: CurvePoint[];
+	g: CurvePoint[];
+	b: CurvePoint[];
+}
+
+export interface ColorGrading {
+	brightness: number; // -1 to 1
+	contrast: number;   // -1 to 1
+	saturation: number; // -1 to 1
+	hue: number;        // -180 to 180 degrees
+	preset?: ColorGradingPreset;
+	rgbCurves?: RgbCurves;
+}
 
 export function clampFocusToDepth(focus: ZoomFocus, _depth: ZoomDepth): ZoomFocus {
 	return {

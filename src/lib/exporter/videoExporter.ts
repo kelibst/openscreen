@@ -1,5 +1,8 @@
 import type {
 	AnnotationRegion,
+	AudioRegion,
+	ClipRegion,
+	ColorGrading,
 	CropRegion,
 	SpeedRegion,
 	TrimRegion,
@@ -7,6 +10,7 @@ import type {
 	WebcamSizePreset,
 	ZoomRegion,
 } from "@/components/video-editor/types";
+import { toFileUrl } from "@/components/video-editor/projectPersistence";
 import { AsyncVideoFrameQueue } from "./asyncVideoFrameQueue";
 import { AudioProcessor } from "./audioEncoder";
 import { FrameRenderer } from "./frameRenderer";
@@ -37,10 +41,16 @@ interface VideoExporterConfig extends ExportConfig {
 	webcamSizePreset?: WebcamSizePreset;
 	webcamPosition?: { cx: number; cy: number } | null;
 	annotationRegions?: AnnotationRegion[];
+	audioRegions?: AudioRegion[];
+	clipRegions?: ClipRegion[];
+	colorGrading?: ColorGrading;
+	primaryAudioVolume?: number;
+	primaryAudioMuted?: boolean;
 	previewWidth?: number;
 	previewHeight?: number;
 	cursorTelemetry?: import("@/components/video-editor/types").CursorTelemetryPoint[];
 	onProgress?: (progress: ExportProgress) => void;
+	format?: string;
 }
 
 export class VideoExporter {
@@ -101,6 +111,13 @@ export class VideoExporter {
 	private async exportWithEncoderPreference(
 		encoderPreference: HardwareAcceleration,
 	): Promise<ExportResult> {
+		const sortedClips = this.config.clipRegions
+			? [...this.config.clipRegions].sort((a, b) => a.startMs - b.startMs)
+			: [];
+		if (sortedClips.length > 0) {
+			return this.exportWithClips(encoderPreference, sortedClips);
+		}
+
 		let webcamFrameQueue: AsyncVideoFrameQueue | null = null;
 		let stopWebcamDecode = false;
 		let webcamDecodeError: Error | null = null;
@@ -146,6 +163,7 @@ export class VideoExporter {
 				previewWidth: this.config.previewWidth,
 				previewHeight: this.config.previewHeight,
 				cursorTelemetry: this.config.cursorTelemetry,
+				colorGrading: this.config.colorGrading,
 			});
 			this.renderer = renderer;
 			await renderer.initialize();
@@ -347,6 +365,10 @@ export class VideoExporter {
 						this.config.trimRegions,
 						this.config.speedRegions,
 						readEndSec,
+						this.config.audioRegions,
+						readEndSec !== undefined ? readEndSec * 1000 : undefined,
+						this.config.primaryAudioVolume,
+						this.config.primaryAudioMuted,
 					);
 				}
 			}
@@ -360,6 +382,336 @@ export class VideoExporter {
 			if (webcamDecodePromise) {
 				await webcamDecodePromise.catch(() => undefined);
 			}
+		}
+	}
+
+	private async exportWithClips(
+		encoderPreference: HardwareAcceleration,
+		sortedClips: ClipRegion[],
+	): Promise<ExportResult> {
+		this.cleanup();
+		this.cancelled = false;
+		this.fatalEncoderError = null;
+
+		try {
+			// Load metadata for all clips to compute total frame count and get primary info
+			const clipDecoders: StreamingVideoDecoder[] = [];
+			const clipMetas: Awaited<ReturnType<StreamingVideoDecoder["loadMetadata"]>>[] = [];
+			for (const clip of sortedClips) {
+				const clipUrl = clip.sourcePath.startsWith("file://")
+					? clip.sourcePath
+					: toFileUrl(clip.sourcePath);
+				const decoder = new StreamingVideoDecoder();
+				const meta = await decoder.loadMetadata(clipUrl);
+				clipDecoders.push(decoder);
+				clipMetas.push(meta);
+			}
+
+			const primaryMeta = clipMetas[0];
+			const frameDuration = 1_000_000 / this.config.frameRate;
+
+			// Compute total frames across all clips
+			let totalFrames = 0;
+			for (let i = 0; i < sortedClips.length; i++) {
+				const clip = sortedClips[i];
+				const clipDurationMs = clip.endMs - clip.startMs;
+				totalFrames += Math.ceil((clipDurationMs / 1000) * this.config.frameRate);
+			}
+
+			const renderer = new FrameRenderer({
+				width: this.config.width,
+				height: this.config.height,
+				wallpaper: this.config.wallpaper,
+				zoomRegions: this.config.zoomRegions,
+				showShadow: this.config.showShadow,
+				shadowIntensity: this.config.shadowIntensity,
+				showBlur: this.config.showBlur,
+				motionBlurAmount: this.config.motionBlurAmount,
+				borderRadius: this.config.borderRadius,
+				padding: this.config.padding,
+				cropRegion: this.config.cropRegion,
+				videoWidth: primaryMeta.width,
+				videoHeight: primaryMeta.height,
+				webcamSize: null,
+				webcamLayoutPreset: this.config.webcamLayoutPreset,
+				webcamMaskShape: this.config.webcamMaskShape,
+				webcamSizePreset: this.config.webcamSizePreset,
+				webcamPosition: this.config.webcamPosition,
+				annotationRegions: this.config.annotationRegions,
+				speedRegions: this.config.speedRegions,
+				previewWidth: this.config.previewWidth,
+				previewHeight: this.config.previewHeight,
+				cursorTelemetry: this.config.cursorTelemetry,
+				colorGrading: this.config.colorGrading,
+			});
+			this.renderer = renderer;
+			await renderer.initialize();
+
+			await this.initializeEncoder(encoderPreference);
+
+			const hasAudio = primaryMeta.hasAudio;
+			const totalOutputDurationMs = sortedClips[sortedClips.length - 1].endMs;
+			const muxer = new VideoMuxer(this.config, hasAudio);
+			this.muxer = muxer;
+			await muxer.initialize();
+
+			const maxEncodeQueue =
+				encoderPreference === "prefer-software"
+					? Math.min(this.MAX_ENCODE_QUEUE, 32)
+					: this.MAX_ENCODE_QUEUE;
+
+			let frameIndex = 0;
+			// Buffered rendered frames (as ImageData) from the tail of the previous clip,
+			// used to supply the outgoing frame during a transition window.
+			let prevClipTailFrames: ImageData[] = [];
+
+			for (let clipIdx = 0; clipIdx < sortedClips.length; clipIdx++) {
+				if (this.cancelled) break;
+				const clip = sortedClips[clipIdx];
+				const clipDecoder = clipDecoders[clipIdx];
+				const clipDurationMs = clip.endMs - clip.startMs;
+
+				// Determine if this clip has a non-cut transition and how many frames that spans
+				const hasTransition =
+					clipIdx > 0 &&
+					clip.transitionIn &&
+					clip.transitionIn !== "cut" &&
+					(clip.transitionInDurationMs ?? 0) > 0;
+				const transitionFrameCount = hasTransition
+					? Math.ceil(((clip.transitionInDurationMs ?? 0) / 1000) * this.config.frameRate)
+					: 0;
+
+				// If the NEXT clip has a transition, we need to buffer its tail frames during this clip.
+				const nextClip = sortedClips[clipIdx + 1];
+				const nextHasTransition =
+					nextClip &&
+					nextClip.transitionIn &&
+					nextClip.transitionIn !== "cut" &&
+					(nextClip.transitionInDurationMs ?? 0) > 0;
+				const nextTransitionFrameCount = nextHasTransition
+					? Math.ceil(((nextClip.transitionInDurationMs ?? 0) / 1000) * this.config.frameRate)
+					: 0;
+
+				// Build trim regions that exclude everything outside [sourceOffsetMs, sourceOffsetMs + clipDurationMs].
+				// TrimRegion means "skip this range", so we skip the prefix and the suffix.
+				const clipTrimRegions: TrimRegion[] = [];
+				if (clip.sourceOffsetMs > 0) {
+					clipTrimRegions.push({
+						id: `clip-${clipIdx}-prefix`,
+						startMs: 0,
+						endMs: clip.sourceOffsetMs,
+					});
+				}
+				clipTrimRegions.push({
+					id: `clip-${clipIdx}-suffix`,
+					startMs: clip.sourceOffsetMs + clipDurationMs,
+					endMs: Number.MAX_SAFE_INTEGER,
+				});
+
+				let localFrameIndex = 0;
+				const clipTotalFrames = Math.ceil((clipDurationMs / 1000) * this.config.frameRate);
+				// Rolling buffer of rendered ImageData for the tail of this clip (used by next clip's transition)
+				const tailBuffer: ImageData[] = [];
+				// Snapshot of previous clip's tail to use during this clip's transition
+				const outgoingTailFrames = prevClipTailFrames;
+
+				const MAX_LOOP_ITERATIONS = 100;
+				let loopIteration = 0;
+				let loopDecoder: StreamingVideoDecoder = clipDecoder;
+
+				do {
+					if (loopIteration > 0) {
+						// For subsequent loop iterations, create a fresh decoder from the same URL
+						const clipUrl = clip.sourcePath.startsWith("file://")
+							? clip.sourcePath
+							: toFileUrl(clip.sourcePath);
+						loopDecoder = new StreamingVideoDecoder();
+						await loopDecoder.loadMetadata(clipUrl);
+					}
+
+				await loopDecoder.decodeAll(
+					this.config.frameRate,
+					clipTrimRegions,
+					undefined,
+					async (videoFrame, _exportTimestampUs, _sourceTimestampMs) => {
+						try {
+							if (this.cancelled) return;
+							if (this.fatalEncoderError) throw this.fatalEncoderError;
+							if (localFrameIndex >= clipTotalFrames) {
+								videoFrame.close();
+								return;
+							}
+
+							// Place this frame at its correct position in the output timeline
+							const outputTimestamp =
+								clip.startMs * 1000 + localFrameIndex * frameDuration;
+
+							// Determine if we are inside this clip's transition window
+							const inTransitionWindow =
+								hasTransition &&
+								localFrameIndex < transitionFrameCount &&
+								outgoingTailFrames.length > 0;
+
+							if (inTransitionWindow) {
+								// Map localFrameIndex into the tail buffer from the previous clip.
+								// tailBuffer was filled from the end of the previous clip; index 0 = earliest tail frame.
+								const tailOffset = outgoingTailFrames.length - transitionFrameCount;
+								const tailIdx = Math.max(0, tailOffset) + localFrameIndex;
+								const outgoingImageData = outgoingTailFrames[Math.min(tailIdx, outgoingTailFrames.length - 1)];
+
+								const transitionProgress = localFrameIndex / transitionFrameCount;
+
+								// Build a VideoFrame from the outgoing ImageData so we can pass it to the renderer
+								const outgoingFrame = new VideoFrame(outgoingImageData.data.buffer, {
+									format: "RGBA",
+									codedWidth: outgoingImageData.width,
+									codedHeight: outgoingImageData.height,
+									timestamp: outputTimestamp,
+									duration: frameDuration,
+									colorSpace: {
+										primaries: "bt709",
+										transfer: "iec61966-2-1",
+										matrix: "rgb",
+										fullRange: true,
+									},
+								});
+
+								try {
+									await renderer.renderTransitionFrame(
+										outgoingFrame,
+										videoFrame,
+										outputTimestamp,
+										clip.transitionIn!,
+										transitionProgress,
+									);
+								} finally {
+									outgoingFrame.close();
+								}
+							} else {
+								await renderer.renderFrame(videoFrame, outputTimestamp, null);
+							}
+
+							const canvas = renderer.getCanvas();
+							const canvasCtx = canvas.getContext("2d")!;
+							const imageData = canvasCtx.getImageData(0, 0, canvas.width, canvas.height);
+
+							// Buffer the tail frames of this clip for the next clip's transition
+							if (nextHasTransition) {
+								const firstTailFrameIndex = clipTotalFrames - nextTransitionFrameCount;
+								if (localFrameIndex >= firstTailFrameIndex) {
+									tailBuffer.push(imageData);
+								}
+							}
+
+							const exportFrame = new VideoFrame(imageData.data.buffer, {
+								format: "RGBA",
+								codedWidth: canvas.width,
+								codedHeight: canvas.height,
+								timestamp: outputTimestamp,
+								duration: frameDuration,
+								colorSpace: {
+									primaries: "bt709",
+									transfer: "iec61966-2-1",
+									matrix: "rgb",
+									fullRange: true,
+								},
+							});
+
+							while (
+								this.encoder &&
+								this.encoder.encodeQueueSize >= maxEncodeQueue &&
+								!this.cancelled
+							) {
+								if (Date.now() - this.lastEncoderOutputAt > ENCODER_STALL_TIMEOUT_MS) {
+									exportFrame.close();
+									throw new Error("The video encoder stopped responding during export.");
+								}
+								await new Promise((resolve) => setTimeout(resolve, 5));
+							}
+
+							if (this.encoder && this.encoder.state === "configured") {
+								this.encodeQueue++;
+								this.encoder.encode(exportFrame, {
+									keyFrame: frameIndex % 150 === 0,
+								});
+							}
+
+							exportFrame.close();
+							localFrameIndex++;
+							frameIndex++;
+
+							this.reportProgress({
+								currentFrame: frameIndex,
+								totalFrames,
+								percentage: (frameIndex / totalFrames) * 100,
+								estimatedTimeRemaining: 0,
+							});
+						} finally {
+							videoFrame.close();
+						}
+					},
+				);
+
+				if (loopIteration > 0) {
+					try { loopDecoder.destroy(); } catch { /* no-op */ }
+				}
+				loopIteration++;
+				} while (clip.loop && localFrameIndex < clipTotalFrames && loopIteration < MAX_LOOP_ITERATIONS && !this.cancelled);
+
+				// Save tail frames from this clip so the next clip's transition can use them
+				prevClipTailFrames = tailBuffer;
+			}
+
+			if (this.cancelled) return { success: false, error: "Export cancelled" };
+			if (this.fatalEncoderError) throw this.fatalEncoderError;
+
+			if (this.encoder && this.encoder.state === "configured") {
+				await this.withTimeout(
+					this.encoder.flush(),
+					ENCODER_FLUSH_TIMEOUT_MS,
+					"The video encoder stopped responding while finalizing the export.",
+				);
+			}
+
+			if (this.fatalEncoderError) throw this.fatalEncoderError;
+
+			await Promise.all(this.muxingPromises);
+
+			this.reportProgress({
+				currentFrame: totalFrames,
+				totalFrames,
+				percentage: 100,
+				estimatedTimeRemaining: 0,
+				phase: "finalizing",
+			});
+
+			// Process audio from primary clip + any external AudioRegions
+			if (hasAudio && !this.cancelled) {
+				const demuxer = clipDecoders[0].getDemuxer();
+				if (demuxer) {
+					this.audioProcessor = new AudioProcessor();
+					const primaryClipMuted = sortedClips[0].audioMuted === true;
+					await this.audioProcessor.process(
+						demuxer,
+						muxer,
+						sortedClips[0].sourcePath.startsWith("file://")
+							? sortedClips[0].sourcePath
+							: toFileUrl(sortedClips[0].sourcePath),
+						undefined,
+						undefined,
+						undefined,
+						this.config.audioRegions,
+						totalOutputDurationMs,
+						this.config.primaryAudioVolume,
+						(this.config.primaryAudioMuted ?? false) || primaryClipMuted,
+					);
+				}
+			}
+
+			const blob = await muxer.finalize();
+			return { success: true, blob };
+		} finally {
+			// nothing to clean up here beyond what cleanup() handles
 		}
 	}
 

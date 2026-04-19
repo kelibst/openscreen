@@ -1,7 +1,7 @@
 import type { Span } from "dnd-timeline";
 import { useItem, useTimelineContext } from "dnd-timeline";
-import { Gauge, MessageSquare, Scissors, ZoomIn } from "lucide-react";
-import { useMemo } from "react";
+import { Film, Gauge, Lock, MessageSquare, Music, Scissors, ZoomIn } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
 	DEFAULT_ZOOM_IN_MS,
@@ -9,6 +9,8 @@ import {
 	getDurations,
 } from "../videoPlayback/zoomRegionUtils";
 import glassStyles from "./ItemGlass.module.css";
+import { thumbnailCache } from "./ThumbnailCache";
+import { waveformCache } from "./WaveformCache";
 
 interface ItemProps {
 	id: string;
@@ -22,7 +24,12 @@ interface ItemProps {
 	zoomOutDurationMs?: number;
 	speedValue?: number;
 	onZoomDurationChange?: (id: string, zoomIn: number, zoomOut: number) => void;
-	variant?: "zoom" | "trim" | "annotation" | "speed" | "blur";
+	variant?: "zoom" | "trim" | "annotation" | "speed" | "blur" | "audio" | "clip";
+	audioVolume?: number;
+	isPrimary?: boolean;
+	disableDrag?: boolean;
+	sourcePath?: string;
+	sourceOffsetMs?: number;
 }
 
 // Map zoom depth to multiplier labels
@@ -55,11 +62,68 @@ export default function Item({
 	zoomInDurationMs,
 	zoomOutDurationMs,
 	speedValue,
+	audioVolume,
+	isPrimary = false,
+	disableDrag = false,
 	variant = "zoom",
 	children,
 	onZoomDurationChange,
+	sourcePath,
+	sourceOffsetMs = 0,
 }: ItemProps) {
 	const { pixelsToValue } = useTimelineContext();
+
+	const [waveform, setWaveform] = useState<Float32Array | null>(null);
+	const [thumbnails, setThumbnails] = useState<string[]>([]);
+	const waveformCanvasRef = useRef<HTMLCanvasElement>(null);
+
+	const durationMs = span.end - span.start;
+
+	useEffect(() => {
+		if (variant !== "audio" || !sourcePath) return;
+		const durationSec = durationMs / 1000;
+		const cached = waveformCache.get(sourcePath);
+		if (cached) { setWaveform(cached); return; }
+		waveformCache.load(sourcePath, durationSec).then(setWaveform).catch(() => {});
+	}, [variant, sourcePath, durationMs]);
+
+	useEffect(() => {
+		if (variant !== "clip" || !sourcePath || isPrimary) return;
+		const cached = thumbnailCache.get(sourcePath, 0);
+		if (cached !== null) {
+			thumbnailCache.load(sourcePath, 8).then(setThumbnails).catch(() => {});
+			return;
+		}
+		thumbnailCache.load(sourcePath, 8).then(setThumbnails).catch(() => {});
+	}, [variant, sourcePath, isPrimary]);
+
+	useEffect(() => {
+		if (!waveform || !waveformCanvasRef.current) return;
+		const canvas = waveformCanvasRef.current;
+		const ctx = canvas.getContext("2d");
+		if (!ctx) return;
+
+		const W = canvas.width;
+		const H = canvas.height;
+		ctx.clearRect(0, 0, W, H);
+
+		const totalDurationMs = (waveform.length / 200) * 1000;
+		const offsetRatio = totalDurationMs > 0 ? sourceOffsetMs / totalDurationMs : 0;
+		const durationRatio = totalDurationMs > 0 ? durationMs / totalDurationMs : 1;
+
+		const startPeak = Math.floor(offsetRatio * waveform.length);
+		const peakCount = Math.ceil(durationRatio * waveform.length);
+
+		ctx.fillStyle = "rgba(124, 58, 237, 0.6)";
+		const barWidth = Math.max(1, W / Math.max(peakCount, 1));
+
+		for (let i = 0; i < peakCount; i++) {
+			const peak = waveform[startPeak + i] ?? 0;
+			const barH = Math.max(1, peak * H * 0.9);
+			const x = (i / peakCount) * W;
+			ctx.fillRect(x, (H - barH) / 2, barWidth - 0.5, barH);
+		}
+	}, [waveform, durationMs, sourceOffsetMs]);
 	const { setNodeRef, attributes, listeners, itemStyle, itemContentStyle } = useItem({
 		id,
 		span,
@@ -69,6 +133,8 @@ export default function Item({
 	const isZoom = variant === "zoom";
 	const isTrim = variant === "trim";
 	const isSpeed = variant === "speed";
+	const isAudio = variant === "audio";
+	const isClip = variant === "clip";
 
 	const glassClass = isZoom
 		? glassStyles.glassGreen
@@ -76,9 +142,23 @@ export default function Item({
 			? glassStyles.glassRed
 			: isSpeed
 				? glassStyles.glassAmber
-				: glassStyles.glassYellow;
+				: isAudio
+					? glassStyles.glassPurple ?? glassStyles.glassAmber
+					: isClip
+						? glassStyles.glassBlue ?? glassStyles.glassGreen
+						: glassStyles.glassYellow;
 
-	const endCapColor = isZoom ? "#21916A" : isTrim ? "#ef4444" : isSpeed ? "#d97706" : "#B4A046";
+	const endCapColor = isZoom
+		? "#21916A"
+		: isTrim
+			? "#ef4444"
+			: isSpeed
+				? "#d97706"
+				: isAudio
+					? "#7c3aed"
+					: isClip
+						? "#2563eb"
+						: "#B4A046";
 
 	const timeLabel = useMemo(
 		() => `${formatMs(span.start)} – ${formatMs(span.end)}`,
@@ -105,7 +185,7 @@ export default function Item({
 		<div
 			ref={setNodeRef}
 			style={safeItemStyle}
-			{...listeners}
+			{...(disableDrag ? {} : listeners)}
 			{...attributes}
 			onPointerDownCapture={() => onSelect?.()}
 			className="group"
@@ -114,15 +194,42 @@ export default function Item({
 				<div
 					className={cn(
 						glassClass,
-						"w-full h-full overflow-hidden flex items-center justify-center gap-1.5 cursor-grab active:cursor-grabbing relative",
+						"w-full h-full overflow-hidden flex items-center justify-center gap-1.5 relative",
+						disableDrag ? "cursor-default" : "cursor-grab active:cursor-grabbing",
 						isSelected && glassStyles.selected,
 					)}
-					style={{ height: 40, color: "#fff", minWidth: 24 }}
+					style={{ height: isClip ? 52 : isAudio ? 44 : 40, color: "#fff", minWidth: 24 }}
 					onClick={(event) => {
 						event.stopPropagation();
 						onSelect?.();
 					}}
 				>
+					{isAudio && waveform && waveform.length > 0 && (
+						<canvas
+							ref={waveformCanvasRef}
+							width={400}
+							height={44}
+							className="absolute inset-0 w-full h-full pointer-events-none opacity-70"
+							style={{ imageRendering: "pixelated" }}
+						/>
+					)}
+
+					{isClip && !isPrimary && thumbnails.length > 0 && (
+						<div className="absolute inset-0 flex overflow-hidden pointer-events-none rounded-[7px]">
+							{thumbnails.map((src, i) => (
+								<img
+									key={i}
+									src={src}
+									alt=""
+									className="h-full object-cover shrink-0"
+									style={{ width: `${100 / thumbnails.length}%` }}
+									draggable={false}
+								/>
+							))}
+							<div className="absolute inset-0 bg-blue-900/40 pointer-events-none" />
+						</div>
+					)}
+
 					{isZoom && (
 						<>
 							{/* Transition In Marker */}
@@ -261,14 +368,36 @@ export default function Item({
 										{speedValue !== undefined ? `${speedValue}×` : "Speed"}
 									</span>
 								</>
-							) : (
-								<>
-									<MessageSquare className="w-3.5 h-3.5 shrink-0" />
-									<span className="text-[11px] font-semibold tracking-tight whitespace-nowrap">
-										{children}
+							) : isAudio ? (
+							<>
+								<Music className="w-3.5 h-3.5 shrink-0" />
+								<span className="text-[11px] font-semibold tracking-tight whitespace-nowrap">
+									{children}
+								</span>
+								{audioVolume !== undefined && (
+									<span className="text-[9px] opacity-60 whitespace-nowrap">
+										{Math.round(audioVolume * 100)}%
 									</span>
-								</>
-							)}
+								)}
+							</>
+						) : isClip ? (
+							<>
+								{isPrimary
+									? <Lock className="w-3 h-3 shrink-0 text-slate-400" />
+									: <Film className="w-3.5 h-3.5 shrink-0 text-blue-300" />
+								}
+								<span className="text-[11px] font-semibold tracking-tight whitespace-nowrap">
+									{children}
+								</span>
+							</>
+						) : (
+							<>
+								<MessageSquare className="w-3.5 h-3.5 shrink-0" />
+								<span className="text-[11px] font-semibold tracking-tight whitespace-nowrap">
+									{children}
+								</span>
+							</>
+						)}
 						</div>
 						<span
 							className={`text-[9px] tabular-nums tracking-tight whitespace-nowrap transition-opacity ${

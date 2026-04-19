@@ -20,11 +20,14 @@ import {
 } from "../../src/lib/recordingSession";
 import { mainT } from "../i18n";
 import { RECORDINGS_DIR } from "../main";
+import { createHomeWindow, getHomeWindow } from "../windows";
 
 const PROJECT_FILE_EXTENSION = "openscreen";
 const SHORTCUTS_FILE = path.join(app.getPath("userData"), "shortcuts.json");
 const RECORDING_SESSION_SUFFIX = ".session.json";
 const ALLOWED_IMPORT_VIDEO_EXTENSIONS = new Set([".webm", ".mp4", ".mov", ".avi", ".mkv"]);
+const ALLOWED_IMPORT_AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".aac", ".ogg", ".flac", ".m4a"]);
+const ALLOWED_IMPORT_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
 
 /**
  * Paths explicitly approved by the user via file picker dialogs or project loads.
@@ -724,6 +727,78 @@ export function registerIpcHandlers(
 		}
 	});
 
+	ipcMain.handle("open-audio-file-picker", async () => {
+		try {
+			const result = await dialog.showOpenDialog({
+				title: "Select Audio File",
+				filters: [
+					{ name: "Audio Files", extensions: ["mp3", "wav", "aac", "ogg", "flac", "m4a"] },
+					{ name: "All Files", extensions: ["*"] },
+				],
+				properties: ["openFile"],
+			});
+
+			if (result.canceled || result.filePaths.length === 0) {
+				return { success: false, canceled: true };
+			}
+
+			const filePath = result.filePaths[0];
+			const ext = path.extname(filePath).toLowerCase();
+			if (!ALLOWED_IMPORT_AUDIO_EXTENSIONS.has(ext)) {
+				return { success: false, message: "Selected file is not a supported audio format" };
+			}
+
+			try {
+				const stats = await fs.stat(filePath);
+				if (!stats.isFile()) return { success: false, message: "Selected path is not a file" };
+			} catch {
+				return { success: false, message: "Selected file does not exist" };
+			}
+
+			approveFilePath(filePath);
+			return { success: true, path: filePath };
+		} catch (error) {
+			console.error("Failed to open audio file picker:", error);
+			return { success: false, message: "Failed to open file picker", error: String(error) };
+		}
+	});
+
+	ipcMain.handle("open-image-file-picker", async () => {
+		try {
+			const result = await dialog.showOpenDialog({
+				title: "Select Image File",
+				filters: [
+					{ name: "Image Files", extensions: ["jpg", "jpeg", "png", "webp", "gif"] },
+					{ name: "All Files", extensions: ["*"] },
+				],
+				properties: ["openFile"],
+			});
+
+			if (result.canceled || result.filePaths.length === 0) {
+				return { success: false, canceled: true };
+			}
+
+			const filePath = result.filePaths[0];
+			const ext = path.extname(filePath).toLowerCase();
+			if (!ALLOWED_IMPORT_IMAGE_EXTENSIONS.has(ext)) {
+				return { success: false, message: "Selected file is not a supported image format" };
+			}
+
+			try {
+				const stats = await fs.stat(filePath);
+				if (!stats.isFile()) return { success: false, message: "Selected path is not a file" };
+			} catch {
+				return { success: false, message: "Selected file does not exist" };
+			}
+
+			approveFilePath(filePath);
+			return { success: true, path: filePath };
+		} catch (error) {
+			console.error("Failed to open image file picker:", error);
+			return { success: false, message: "Failed to open file picker", error: String(error) };
+		}
+	});
+
 	ipcMain.handle("reveal-in-folder", async (_, filePath: string) => {
 		try {
 			// shell.showItemInFolder doesn't return a value, it throws on error
@@ -951,4 +1026,190 @@ export function registerIpcHandlers(
 			return { success: false, error: String(error) };
 		}
 	});
+
+	ipcMain.handle("transcribe-audio", async (_, { sourcePath }: { sourcePath: string }) => {
+		const { execFile } = await import("node:child_process");
+		const { promisify } = await import("node:util");
+		const os = await import("node:os");
+		const execFileAsync = promisify(execFile);
+		const tmpDir = os.tmpdir();
+		try {
+			await execFileAsync("whisper", [
+				sourcePath,
+				"--output_format", "json",
+				"--output_dir", tmpDir,
+				"--word_timestamps", "True",
+			]);
+			const baseName = path.basename(sourcePath, path.extname(sourcePath));
+			const jsonPath = path.join(tmpDir, `${baseName}.json`);
+			const raw = await fs.readFile(jsonPath, "utf-8");
+			const parsed = JSON.parse(raw);
+			const segments: Array<{ start: number; end: number; text: string; words?: Array<{ word: string; start: number; end: number }> }> = parsed.segments ?? [];
+			return { success: true, segments };
+		} catch (error) {
+			const msg = String(error);
+			if (msg.includes("ENOENT") || msg.includes("not found") || msg.includes("cannot find")) {
+				return { success: false, error: "whisper not installed" };
+			}
+			return { success: false, error: msg };
+		}
+	});
+
+	ipcMain.handle("save-temp-audio", async (_, { data, fileName }: { data: ArrayBuffer; fileName: string }) => {
+		try {
+			const os = await import("node:os");
+			const tmpPath = path.join(os.tmpdir(), fileName);
+			await fs.writeFile(tmpPath, Buffer.from(data));
+			approveFilePath(tmpPath);
+			return { success: true, outputPath: tmpPath };
+		} catch (error) {
+			return { success: false, error: String(error) };
+		}
+	});
+
+	ipcMain.handle("extract-audio", async (_, { sourcePath }: { sourcePath: string }) => {
+		const { execFile } = await import("node:child_process");
+		const { promisify } = await import("node:util");
+		const os = await import("node:os");
+		const execFileAsync = promisify(execFile);
+		try {
+			const baseName = path.basename(sourcePath, path.extname(sourcePath));
+			const outPath = path.join(os.tmpdir(), `${baseName}-extracted-${Date.now()}.wav`);
+			await execFileAsync("ffmpeg", ["-y", "-i", sourcePath, "-vn", "-acodec", "pcm_s16le", outPath]);
+			approveFilePath(outPath);
+			return { success: true, outputPath: outPath };
+		} catch (error) {
+			const msg = String(error);
+			if (msg.includes("ENOENT") || msg.includes("not found")) {
+				return { success: false, error: "ffmpeg not found on PATH" };
+			}
+			return { success: false, error: msg };
+		}
+	});
+
+	const RECENT_FILES_KEY = "recentFiles";
+	const RECENT_FILES_PATH = path.join(app.getPath("userData"), "recent-files.json");
+	const MAX_RECENT_FILES = 8;
+
+	async function loadRecentFiles(): Promise<Array<{ path: string; name: string; lastOpened: number }>> {
+		try {
+			const raw = await fs.readFile(RECENT_FILES_PATH, "utf-8");
+			return JSON.parse(raw);
+		} catch {
+			return [];
+		}
+	}
+
+	async function saveRecentFiles(files: Array<{ path: string; name: string; lastOpened: number }>): Promise<void> {
+		await fs.writeFile(RECENT_FILES_PATH, JSON.stringify(files, null, 2), "utf-8");
+	}
+
+	ipcMain.handle("get-recent-files", async () => {
+		return loadRecentFiles();
+	});
+
+	ipcMain.handle("add-recent-file", async (_, entry: { path: string; name: string; lastOpened: number }) => {
+		try {
+			const files = await loadRecentFiles();
+			const filtered = files.filter((f) => f.path !== entry.path);
+			const updated = [entry, ...filtered].slice(0, MAX_RECENT_FILES);
+			await saveRecentFiles(updated);
+			return { success: true };
+		} catch (error) {
+			return { success: false, error: String(error) };
+		}
+	});
+
+	ipcMain.handle("clear-recent-files", async () => {
+		try {
+			await saveRecentFiles([]);
+			return { success: true };
+		} catch (error) {
+			return { success: false, error: String(error) };
+		}
+	});
+
+	ipcMain.handle("open-home-window", () => {
+		const existing = getHomeWindow();
+		if (existing && !existing.isDestroyed()) {
+			existing.focus();
+		} else {
+			createHomeWindow();
+		}
+	});
+
+	ipcMain.handle("open-editor-from-file", async (_, filePath: string) => {
+		try {
+			const ext = path.extname(filePath).toLowerCase();
+			if (ext === `.${PROJECT_FILE_EXTENSION}`) {
+				approveFilePath(filePath);
+				currentProjectPath = filePath;
+				createEditorWindow();
+			} else if (ALLOWED_IMPORT_VIDEO_EXTENSIONS.has(ext)) {
+				approveFilePath(filePath);
+				const restoredSession = await loadRecordedSessionForVideoPath(filePath);
+				if (restoredSession) {
+					approveFilePath(restoredSession.screenVideoPath);
+					if (restoredSession.webcamVideoPath) {
+						approveFilePath(restoredSession.webcamVideoPath);
+					}
+					setCurrentRecordingSessionState(restoredSession);
+				} else {
+					setCurrentRecordingSessionState({ screenVideoPath: filePath, createdAt: Date.now() });
+				}
+				currentProjectPath = null;
+				createEditorWindow();
+			}
+		} catch (error) {
+			console.error("open-editor-from-file error:", error);
+		}
+	});
+
+	void RECENT_FILES_KEY;
+
+	ipcMain.handle("extract-thumbnails", async (_, { sourcePath, count }: { sourcePath: string; count: number }) => {
+		const { execFile } = await import("node:child_process");
+		const { promisify } = await import("node:util");
+		const os = await import("node:os");
+		const execFileAsync = promisify(execFile);
+
+		const normalizedSource = normalizeVideoSourcePath(sourcePath);
+		if (!normalizedSource || !isPathAllowed(normalizedSource)) {
+			return { success: false, error: "Path not allowed" };
+		}
+
+		const safeCount = Math.max(1, Math.min(count, 50));
+		const tmpDir = path.join(os.tmpdir(), `openscreen-thumbs-${Date.now()}`);
+
+		try {
+			await fs.mkdir(tmpDir, { recursive: true });
+
+			await execFileAsync("ffmpeg", [
+				"-y",
+				"-i", normalizedSource,
+				"-vf", `fps=${safeCount}/999999`,
+				"-vframes", String(safeCount),
+				"-vcodec", "mjpeg",
+				"-q:v", "5",
+				path.join(tmpDir, "thumb%04d.jpg"),
+			], { maxBuffer: 50 * 1024 * 1024 });
+
+			const files = (await fs.readdir(tmpDir))
+				.filter((f) => f.endsWith(".jpg"))
+				.sort();
+
+			const frames: string[] = [];
+			for (const file of files) {
+				const data = await fs.readFile(path.join(tmpDir, file));
+				frames.push(`data:image/jpeg;base64,${data.toString("base64")}`);
+			}
+
+			await fs.rm(tmpDir, { recursive: true, force: true });
+			return { success: true, frames };
+		} catch (error) {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+			return { success: false, error: String(error) };
+		}
+	});
 }
+

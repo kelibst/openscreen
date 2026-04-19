@@ -24,6 +24,7 @@ export function FormatSelector({
 	const formatLabels: Record<ExportFormat, { label: string; description: string }> = {
 		mp4: { label: t("exportFormat.mp4Video"), description: t("exportFormat.mp4Description") },
 		gif: { label: t("exportFormat.gifAnimation"), description: t("exportFormat.gifDescription") },
+		webm: { label: "WebM (VP9)", description: "Open web format" },
 	};
 
 	return (

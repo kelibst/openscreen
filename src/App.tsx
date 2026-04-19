@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { HomeScreen } from "./components/HomeScreen";
 import { LaunchWindow } from "./components/launch/LaunchWindow";
 import { SourceSelector } from "./components/launch/SourceSelector";
 import { Toaster } from "./components/ui/sonner";
@@ -29,6 +30,8 @@ export default function App() {
 
 	const content = (() => {
 		switch (windowType) {
+			case "home":
+				return <HomeScreen />;
 			case "hud-overlay":
 				return <LaunchWindow />;
 			case "source-selector":

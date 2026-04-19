@@ -6,6 +6,7 @@ import { FaRegStopCircle } from "react-icons/fa";
 import { FaFolderOpen } from "react-icons/fa6";
 import { FiMinus, FiX } from "react-icons/fi";
 import {
+	MdAdd,
 	MdCancel,
 	MdMic,
 	MdMicOff,
@@ -48,6 +49,7 @@ const ICON_CONFIG = {
 	restart: { icon: MdRestartAlt, size: ICON_SIZE },
 	cancel: { icon: MdCancel, size: ICON_SIZE },
 	record: { icon: BsRecordCircle, size: ICON_SIZE },
+	newProject: { icon: MdAdd, size: ICON_SIZE },
 	videoFile: { icon: MdVideoFile, size: ICON_SIZE },
 	folder: { icon: FaFolderOpen, size: ICON_SIZE },
 	minimize: { icon: FiMinus, size: ICON_SIZE },
@@ -275,6 +277,11 @@ export function LaunchWindow() {
 		if (window.electronAPI) {
 			window.electronAPI.openSourceSelector();
 		}
+	};
+
+	const openNewProject = async () => {
+		await window.electronAPI.clearCurrentVideoPath();
+		await window.electronAPI.switchToEditor();
 	};
 
 	const openVideoFile = async () => {
@@ -585,6 +592,16 @@ export function LaunchWindow() {
 
 				{!recording && (
 					<>
+						{/* New project */}
+						<Tooltip content="New Project">
+							<button
+								className={`${hudIconBtnClasses} ${styles.electronNoDrag}`}
+								onClick={openNewProject}
+							>
+								{getIcon("newProject", "text-white/60")}
+							</button>
+						</Tooltip>
+
 						{/* Open video file */}
 						<Tooltip content={t("tooltips.openVideoFile")}>
 							<button

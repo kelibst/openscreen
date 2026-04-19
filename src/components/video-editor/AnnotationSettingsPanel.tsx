@@ -37,6 +37,7 @@ import {
 	type AnnotationType,
 	type ArrowDirection,
 	type FigureData,
+	type TextAnimationPreset,
 } from "./types";
 
 interface AnnotationSettingsPanelProps {
@@ -44,6 +45,7 @@ interface AnnotationSettingsPanelProps {
 	onContentChange: (content: string) => void;
 	onTypeChange: (type: AnnotationType) => void;
 	onStyleChange: (style: Partial<AnnotationRegion["style"]>) => void;
+	onPatchChange?: (patch: Partial<AnnotationRegion>) => void;
 	onFigureDataChange?: (figureData: FigureData) => void;
 	onDelete: () => void;
 }
@@ -66,6 +68,7 @@ export function AnnotationSettingsPanel({
 	onContentChange,
 	onTypeChange,
 	onStyleChange,
+	onPatchChange,
 	onFigureDataChange,
 	onDelete,
 }: AnnotationSettingsPanelProps) {
@@ -454,6 +457,67 @@ export function AnnotationSettingsPanel({
 								</div>
 							</div>
 						</div>
+
+						{/* Text animation section */}
+						{onPatchChange && (
+							<div className="flex flex-col gap-3 pt-2 border-t border-white/10">
+								<label className="text-xs font-medium text-slate-400">Animation</label>
+								<select
+									value={annotation.textAnimation?.preset ?? "none"}
+									onChange={(e) => {
+										const preset = e.target.value as TextAnimationPreset;
+										onPatchChange({
+											textAnimation:
+												preset === "none"
+													? undefined
+													: {
+															preset,
+															durationMs: annotation.textAnimation?.durationMs ?? 500,
+														},
+										});
+									}}
+									className="w-full bg-white/5 border border-white/10 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-[#34B27B]/50"
+								>
+									<option value="none" className="bg-[#1a1a1a]">None</option>
+									<option value="fade-in" className="bg-[#1a1a1a]">Fade In</option>
+									<option value="fade-out" className="bg-[#1a1a1a]">Fade Out</option>
+									<option value="fade-in-out" className="bg-[#1a1a1a]">Fade In/Out</option>
+									<option value="slide-up" className="bg-[#1a1a1a]">Slide Up</option>
+									<option value="slide-down" className="bg-[#1a1a1a]">Slide Down</option>
+									<option value="slide-left" className="bg-[#1a1a1a]">Slide Left</option>
+									<option value="slide-right" className="bg-[#1a1a1a]">Slide Right</option>
+									<option value="scale-in" className="bg-[#1a1a1a]">Scale In</option>
+									<option value="bounce-in" className="bg-[#1a1a1a]">Bounce In</option>
+									<option value="typewriter" className="bg-[#1a1a1a]">Typewriter</option>
+								</select>
+								{annotation.textAnimation && annotation.textAnimation.preset !== "none" && (
+									<div className="flex flex-col gap-1">
+										<div className="flex items-center justify-between">
+											<label className="text-xs text-slate-500">Duration</label>
+											<span className="text-xs text-slate-300 tabular-nums">
+												{((annotation.textAnimation.durationMs) / 1000).toFixed(1)}s
+											</span>
+										</div>
+										<input
+											type="range"
+											min={100}
+											max={2000}
+											step={50}
+											value={annotation.textAnimation.durationMs}
+											onChange={(e) =>
+												onPatchChange({
+													textAnimation: {
+														...annotation.textAnimation!,
+														durationMs: Number(e.target.value),
+													},
+												})
+											}
+											className="w-full accent-[#34B27B]"
+										/>
+									</div>
+								)}
+							</div>
+						)}
 					</TabsContent>
 
 					{/* Image Upload */}
@@ -481,6 +545,50 @@ export function AnnotationSettingsPanel({
 									alt="Uploaded annotation"
 									className="w-full h-auto rounded-md"
 								/>
+							</div>
+						)}
+
+						{onPatchChange && (
+							<div className="flex flex-col gap-3">
+								<div className="flex items-center justify-between">
+									<label className="text-xs text-slate-400">Full Frame Background</label>
+									<button
+										type="button"
+										onClick={() =>
+											onPatchChange({ imageFullFrame: !annotation.imageFullFrame })
+										}
+										className={cn(
+											"relative inline-flex h-5 w-9 rounded-full transition-colors focus:outline-none",
+											annotation.imageFullFrame ? "bg-[#34B27B]" : "bg-white/20",
+										)}
+									>
+										<span
+											className={cn(
+												"inline-block h-4 w-4 rounded-full bg-white shadow transform transition-transform mt-0.5",
+												annotation.imageFullFrame ? "translate-x-[18px]" : "translate-x-0.5",
+											)}
+										/>
+									</button>
+								</div>
+
+								{annotation.imageFullFrame && (
+									<div className="flex flex-col gap-1">
+										<label className="text-xs text-slate-500">Fit Mode</label>
+										<select
+											value={annotation.imageFit ?? "cover"}
+											onChange={(e) =>
+												onPatchChange({
+													imageFit: e.target.value as "cover" | "contain" | "fill",
+												})
+											}
+											className="w-full bg-white/5 border border-white/10 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-[#34B27B]/50"
+										>
+											<option value="cover" className="bg-[#1a1a1a]">Cover (crop to fill)</option>
+											<option value="contain" className="bg-[#1a1a1a]">Contain (letterbox)</option>
+											<option value="fill" className="bg-[#1a1a1a]">Stretch to fill</option>
+										</select>
+									</div>
+								)}
 							</div>
 						)}
 

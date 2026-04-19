@@ -10,12 +10,63 @@ const RENDERER_DIST = path.join(APP_ROOT, "dist");
 const HEADLESS = process.env["HEADLESS"] === "true";
 
 let hudOverlayWindow: BrowserWindow | null = null;
+let homeWindow: BrowserWindow | null = null;
 
 ipcMain.on("hud-overlay-hide", () => {
 	if (hudOverlayWindow && !hudOverlayWindow.isDestroyed()) {
 		hudOverlayWindow.minimize();
 	}
 });
+
+/**
+ * Creates the home screen launcher window (800×560px, centered).
+ */
+export function createHomeWindow(): BrowserWindow {
+	const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+	const windowWidth = 800;
+	const windowHeight = 560;
+
+	const win = new BrowserWindow({
+		width: windowWidth,
+		height: windowHeight,
+		x: Math.round((width - windowWidth) / 2),
+		y: Math.round((height - windowHeight) / 2),
+		resizable: false,
+		alwaysOnTop: false,
+		skipTaskbar: false,
+		title: "OpenScreen",
+		backgroundColor: "#0a0a0b",
+		show: true,
+		webPreferences: {
+			preload: path.join(__dirname, "preload.mjs"),
+			nodeIntegration: false,
+			contextIsolation: true,
+			webSecurity: false,
+		},
+	});
+
+	win.on("closed", () => {
+		if (homeWindow === win) {
+			homeWindow = null;
+		}
+	});
+
+	homeWindow = win;
+
+	if (VITE_DEV_SERVER_URL) {
+		win.loadURL(VITE_DEV_SERVER_URL + "?windowType=home");
+	} else {
+		win.loadFile(path.join(RENDERER_DIST, "index.html"), {
+			query: { windowType: "home" },
+		});
+	}
+
+	return win;
+}
+
+export function getHomeWindow(): BrowserWindow | null {
+	return homeWindow;
+}
 
 /**
  * Creates the always-on-top HUD overlay window centred at the bottom of the

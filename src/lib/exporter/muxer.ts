@@ -5,6 +5,7 @@ import {
 	EncodedVideoPacketSource,
 	Mp4OutputFormat,
 	Output,
+	WebMOutputFormat,
 } from "mediabunny";
 import type { ExportConfig } from "./types";
 
@@ -15,36 +16,36 @@ export class VideoMuxer {
 	private hasAudio: boolean;
 	private target: BufferTarget | null = null;
 	private config: ExportConfig;
+	private isWebM: boolean;
 
 	constructor(config: ExportConfig, hasAudio = false) {
 		this.config = config;
 		this.hasAudio = hasAudio;
+		this.isWebM = (config as { format?: string }).format === "webm";
 	}
 
 	async initialize(): Promise<void> {
-		// Create the buffer target
 		this.target = new BufferTarget();
 
 		this.output = new Output({
-			format: new Mp4OutputFormat({
-				fastStart: "in-memory",
-			}),
+			format: this.isWebM
+				? new WebMOutputFormat()
+				: new Mp4OutputFormat({ fastStart: "in-memory" }),
 			target: this.target,
 		});
 
-		// Create video source - codec will be deduced from metadata
-		this.videoSource = new EncodedVideoPacketSource("avc");
+		// VP9 for WebM, AVC for MP4
+		const videoCodec = this.isWebM ? "vp9" : "avc";
+		this.videoSource = new EncodedVideoPacketSource(videoCodec as "avc");
 		this.output.addVideoTrack(this.videoSource, {
 			frameRate: this.config.frameRate,
 		});
 
-		// Create audio source if needed
 		if (this.hasAudio) {
 			this.audioSource = new EncodedAudioPacketSource("opus");
 			this.output.addAudioTrack(this.audioSource);
 		}
 
-		// Start the output to begin accepting media data
 		await this.output.start();
 	}
 
@@ -84,6 +85,6 @@ export class VideoMuxer {
 			throw new Error("Failed to finalize output");
 		}
 
-		return new Blob([buffer], { type: "video/mp4" });
+		return new Blob([buffer], { type: this.isWebM ? "video/webm" : "video/mp4" });
 	}
 }

@@ -44,6 +44,7 @@ import { getTestId } from "@/utils/getTestId";
 import { AnnotationSettingsPanel } from "./AnnotationSettingsPanel";
 import { BlurSettingsPanel } from "./BlurSettingsPanel";
 import { CropControl } from "./CropControl";
+import { CurvesEditor } from "./CurvesEditor";
 import { KeyboardShortcutsHelp } from "./KeyboardShortcutsHelp";
 import type {
 	AnnotationRegion,
@@ -209,8 +210,11 @@ interface SettingsPanelProps {
 	onAnnotationContentChange?: (id: string, content: string) => void;
 	onAnnotationTypeChange?: (id: string, type: AnnotationType) => void;
 	onAnnotationStyleChange?: (id: string, style: Partial<AnnotationRegion["style"]>) => void;
+	onAnnotationPatchChange?: (id: string, patch: Partial<AnnotationRegion>) => void;
 	onAnnotationFigureDataChange?: (id: string, figureData: FigureData) => void;
 	onAnnotationDelete?: (id: string) => void;
+	colorGrading?: import("./types").ColorGrading;
+	onColorGradingChange?: (cg: import("./types").ColorGrading) => void;
 	selectedBlurId?: string | null;
 	blurRegions?: AnnotationRegion[];
 	onBlurDataChange?: (id: string, blurData: BlurData) => void;
@@ -231,6 +235,15 @@ interface SettingsPanelProps {
 	webcamSizePreset?: WebcamSizePreset;
 	onWebcamSizePresetChange?: (size: WebcamSizePreset) => void;
 	onWebcamSizePresetCommit?: () => void;
+	onAspectRatioChange?: (ar: AspectRatio) => void;
+	faceBlurEnabled?: boolean;
+	onFaceBlurChange?: (enabled: boolean) => void;
+	bgRemovalEnabled?: boolean;
+	onBgRemovalChange?: (enabled: boolean) => void;
+	primaryAudioVolume?: number;
+	primaryAudioMuted?: boolean;
+	onPrimaryAudioVolumeChange?: (volume: number) => void;
+	onPrimaryAudioMutedChange?: (muted: boolean) => void;
 }
 
 export default SettingsPanel;
@@ -300,8 +313,11 @@ export function SettingsPanel({
 	onAnnotationContentChange,
 	onAnnotationTypeChange,
 	onAnnotationStyleChange,
+	onAnnotationPatchChange,
 	onAnnotationFigureDataChange,
 	onAnnotationDelete,
+	colorGrading,
+	onColorGradingChange,
 	selectedBlurId,
 	blurRegions = [],
 	onBlurDataChange,
@@ -322,6 +338,15 @@ export function SettingsPanel({
 	webcamSizePreset = DEFAULT_WEBCAM_SIZE_PRESET,
 	onWebcamSizePresetChange,
 	onWebcamSizePresetCommit,
+	onAspectRatioChange,
+	faceBlurEnabled = false,
+	onFaceBlurChange,
+	bgRemovalEnabled = false,
+	onBgRemovalChange,
+	primaryAudioVolume = 1.0,
+	primaryAudioMuted = false,
+	onPrimaryAudioVolumeChange,
+	onPrimaryAudioMutedChange,
 }: SettingsPanelProps) {
 	const t = useScopedT("settings");
 	const [wallpaperPaths, setWallpaperPaths] = useState<string[]>([]);
@@ -564,6 +589,11 @@ export function SettingsPanel({
 				onContentChange={(content) => onAnnotationContentChange(selectedAnnotation.id, content)}
 				onTypeChange={(type) => onAnnotationTypeChange(selectedAnnotation.id, type)}
 				onStyleChange={(style) => onAnnotationStyleChange(selectedAnnotation.id, style)}
+				onPatchChange={
+					onAnnotationPatchChange
+						? (patch) => onAnnotationPatchChange(selectedAnnotation.id, patch)
+						: undefined
+				}
 				onFigureDataChange={
 					onAnnotationFigureDataChange
 						? (figureData) => onAnnotationFigureDataChange(selectedAnnotation.id, figureData)
@@ -794,6 +824,66 @@ export function SettingsPanel({
 						</Button>
 					)}
 				</div>
+
+				{onPrimaryAudioVolumeChange && (
+					<div className="mb-4">
+						<span className="text-sm font-medium text-slate-200 mb-2 block">Original Audio</span>
+						<div className="flex items-center gap-2 mb-2">
+							<button
+								type="button"
+								onClick={() => onPrimaryAudioMutedChange?.(!primaryAudioMuted)}
+								className={`text-xs px-2 py-1 rounded border transition-colors ${primaryAudioMuted ? "bg-red-500/20 border-red-500/40 text-red-400" : "bg-white/5 border-white/10 text-slate-400 hover:bg-white/10"}`}
+							>
+								{primaryAudioMuted ? "🔇 Muted" : "🔊 Active"}
+							</button>
+							<span className="text-xs text-slate-500 ml-auto tabular-nums">
+								{Math.round(primaryAudioVolume * 100)}%
+							</span>
+						</div>
+						<Slider
+							min={0}
+							max={100}
+							step={1}
+							value={[Math.round(primaryAudioVolume * 100)]}
+							onValueChange={([v]) => onPrimaryAudioVolumeChange(v / 100)}
+							disabled={primaryAudioMuted}
+							className="w-full"
+						/>
+					</div>
+				)}
+
+				{onAspectRatioChange && (
+					<div className="mb-4">
+						<span className="text-sm font-medium text-slate-200 mb-2 block">Canvas Ratio</span>
+						<div className="grid grid-cols-5 gap-1.5">
+							{(
+								[
+									{ label: "TikTok", ratio: "9:16" as AspectRatio },
+									{ label: "Shorts", ratio: "9:16" as AspectRatio },
+									{ label: "YouTube", ratio: "16:9" as AspectRatio },
+									{ label: "Twitter", ratio: "16:9" as AspectRatio },
+									{ label: "Post", ratio: "1:1" as AspectRatio },
+								] as const
+							).map((preset) => (
+								<Button
+									key={preset.label}
+									type="button"
+									onClick={() => onAspectRatioChange(preset.ratio)}
+									className={cn(
+										"h-auto w-full rounded-lg border px-1 py-2 text-center shadow-sm transition-all",
+										"duration-200 ease-out cursor-pointer",
+										aspectRatio === preset.ratio
+											? "border-[#34B27B] bg-[#34B27B] text-white shadow-[#34B27B]/20"
+											: "border-white/5 bg-white/5 text-slate-400 hover:bg-white/10 hover:border-white/10 hover:text-slate-200",
+									)}
+								>
+									<span className="text-[9px] font-semibold leading-tight block">{preset.label}</span>
+									<span className="text-[8px] text-current opacity-70 block">{preset.ratio}</span>
+								</Button>
+							))}
+						</div>
+					</div>
+				)}
 
 				<Accordion
 					type="multiple"
@@ -1057,6 +1147,119 @@ export function SettingsPanel({
 								<Crop className="w-3 h-3" />
 								{t("crop.cropVideo")}
 							</Button>
+						</AccordionContent>
+					</AccordionItem>
+
+					{/* Color grading */}
+					<AccordionItem
+						value="color-grading"
+						className="border-white/5 rounded-xl bg-white/[0.02] px-3"
+					>
+						<AccordionTrigger className="py-2.5 hover:no-underline">
+							<div className="flex items-center gap-2">
+								<Palette className="w-4 h-4 text-purple-400" />
+								<span className="text-xs font-medium">Color Grading</span>
+							</div>
+						</AccordionTrigger>
+						<AccordionContent className="pb-3 flex flex-col gap-2">
+							{(["none","vivid","matte","cinematic","warm","cool","vintage","noir"] as const).length > 0 && (
+								<div className="flex flex-col gap-1">
+									<label className="text-[10px] text-slate-500">Preset</label>
+									<select
+										value={colorGrading?.preset ?? "none"}
+										onChange={(e) => {
+											const preset = e.target.value as import("./types").ColorGradingPreset;
+											onColorGradingChange?.({
+												brightness: colorGrading?.brightness ?? 0,
+												contrast: colorGrading?.contrast ?? 0,
+												saturation: colorGrading?.saturation ?? 0,
+												hue: colorGrading?.hue ?? 0,
+												preset,
+											});
+										}}
+										className="w-full bg-white/5 border border-white/10 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-purple-400/50"
+									>
+										<option value="none" className="bg-[#1a1a1a]">None</option>
+										<option value="vivid" className="bg-[#1a1a1a]">Vivid</option>
+										<option value="matte" className="bg-[#1a1a1a]">Matte</option>
+										<option value="cinematic" className="bg-[#1a1a1a]">Cinematic</option>
+										<option value="warm" className="bg-[#1a1a1a]">Warm</option>
+										<option value="cool" className="bg-[#1a1a1a]">Cool</option>
+										<option value="vintage" className="bg-[#1a1a1a]">Vintage</option>
+										<option value="noir" className="bg-[#1a1a1a]">Noir</option>
+									</select>
+								</div>
+							)}
+							{[
+								{ key: "brightness" as const, label: "Brightness", min: -1, max: 1, step: 0.05 },
+								{ key: "contrast" as const, label: "Contrast", min: -1, max: 1, step: 0.05 },
+								{ key: "saturation" as const, label: "Saturation", min: -1, max: 1, step: 0.05 },
+								{ key: "hue" as const, label: "Hue", min: -180, max: 180, step: 1 },
+							].map(({ key, label, min, max, step }) => (
+								<div key={key} className="p-2 rounded-lg bg-white/5 border border-white/5">
+									<div className="flex items-center justify-between mb-1">
+										<div className="text-[10px] font-medium text-slate-300">{label}</div>
+										<span className="text-[10px] text-slate-500 font-mono">
+											{(colorGrading?.[key] ?? 0).toFixed(key === "hue" ? 0 : 2)}
+										</span>
+									</div>
+									<Slider
+										value={[colorGrading?.[key] ?? 0]}
+										onValueChange={(values) => {
+											onColorGradingChange?.({
+												brightness: colorGrading?.brightness ?? 0,
+												contrast: colorGrading?.contrast ?? 0,
+												saturation: colorGrading?.saturation ?? 0,
+												hue: colorGrading?.hue ?? 0,
+												preset: colorGrading?.preset,
+												[key]: values[0],
+											});
+										}}
+										min={min}
+										max={max}
+										step={step}
+										className="w-full [&_[role=slider]]:bg-purple-400 [&_[role=slider]]:border-purple-400 [&_[role=slider]]:h-3 [&_[role=slider]]:w-3"
+									/>
+								</div>
+							))}
+							<div className="p-2 rounded-lg bg-white/5 border border-white/5">
+								<div className="text-[10px] font-medium text-slate-300 mb-2">Curves</div>
+								<CurvesEditor
+									value={colorGrading?.rgbCurves}
+									onChange={(curves) => {
+										onColorGradingChange?.({
+											brightness: colorGrading?.brightness ?? 0,
+											contrast: colorGrading?.contrast ?? 0,
+											saturation: colorGrading?.saturation ?? 0,
+											hue: colorGrading?.hue ?? 0,
+											preset: colorGrading?.preset,
+											rgbCurves: curves,
+										});
+									}}
+								/>
+							</div>
+							<div className="p-2 rounded-lg bg-white/5 border border-white/5 flex flex-col gap-2">
+								<div className="text-[10px] font-medium text-slate-300">AI Effects</div>
+								<div className="flex items-center justify-between">
+									<span className="text-[10px] text-slate-400">Face Blur (BlazeFace)</span>
+									<Switch
+										checked={faceBlurEnabled}
+										onCheckedChange={onFaceBlurChange}
+									/>
+								</div>
+								<div className="flex items-center justify-between">
+									<span className="text-[10px] text-slate-400">BG Removal (BodyPix)</span>
+									<Switch
+										checked={bgRemovalEnabled}
+										onCheckedChange={onBgRemovalChange}
+									/>
+								</div>
+								{(faceBlurEnabled || bgRemovalEnabled) && (
+									<p className="text-[9px] text-amber-400/80">
+										AI effects slow export significantly
+									</p>
+								)}
+							</div>
 						</AccordionContent>
 					</AccordionItem>
 
@@ -1378,9 +1581,20 @@ export function SettingsPanel({
 						<Image className="w-3.5 h-3.5" />
 						{t("exportFormat.gif")}
 					</button>
+					<button
+						onClick={() => onExportFormatChange?.("webm")}
+						className={cn(
+							"flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg border transition-all text-xs font-medium",
+							exportFormat === "webm"
+								? "bg-[#34B27B]/10 border-[#34B27B]/50 text-white"
+								: "bg-white/5 border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-200",
+						)}
+					>
+						WebM
+					</button>
 				</div>
 
-				{exportFormat === "mp4" && (
+				{(exportFormat === "mp4" || exportFormat === "webm") && (
 					<div className="mb-3 bg-white/5 border border-white/5 p-0.5 w-full grid grid-cols-3 h-7 rounded-lg">
 						<button
 							onClick={() => onExportQualityChange?.("medium")}

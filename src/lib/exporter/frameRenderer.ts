@@ -1,6 +1,7 @@
 import {
 	Application,
 	BlurFilter,
+	ColorMatrixFilter,
 	Container,
 	Graphics,
 	Sprite,
@@ -10,6 +11,7 @@ import {
 import { MotionBlurFilter } from "pixi-filters/motion-blur";
 import type {
 	AnnotationRegion,
+	ColorGrading,
 	CropRegion,
 	SpeedRegion,
 	WebcamLayoutPreset,
@@ -47,6 +49,7 @@ import {
 } from "@/lib/compositeLayout";
 import { drawCanvasClipPath } from "@/lib/webcamMaskShapes";
 import { renderAnnotations } from "./annotationRenderer";
+import { applyRgbCurvesToImageData } from "@/components/video-editor/CurvesEditor";
 import {
 	getLinearGradientPoints,
 	getRadialGradientShape,
@@ -78,6 +81,7 @@ interface FrameRenderConfig {
 	previewWidth?: number;
 	previewHeight?: number;
 	cursorTelemetry?: import("@/components/video-editor/types").CursorTelemetryPoint[];
+	colorGrading?: ColorGrading;
 }
 
 interface AnimationState {
@@ -110,6 +114,7 @@ export class FrameRenderer {
 	private maskGraphics: Graphics | null = null;
 	private blurFilter: BlurFilter | null = null;
 	private motionBlurFilter: MotionBlurFilter | null = null;
+	private colorMatrixFilter: ColorMatrixFilter | null = null;
 	private shadowCanvas: HTMLCanvasElement | null = null;
 	private shadowCtx: CanvasRenderingContext2D | null = null;
 	private compositeCanvas: HTMLCanvasElement | null = null;
@@ -181,7 +186,9 @@ export class FrameRenderer {
 		this.blurFilter.resolution = this.app.renderer.resolution;
 		this.blurFilter.blur = 0;
 		this.motionBlurFilter = new MotionBlurFilter([0, 0], 5, 0);
-		this.videoContainer.filters = [this.blurFilter, this.motionBlurFilter];
+		this.colorMatrixFilter = new ColorMatrixFilter();
+		this.applyColorGrading();
+		this.videoContainer.filters = [this.blurFilter, this.motionBlurFilter, this.colorMatrixFilter];
 
 		// Setup composite canvas for final output with shadows
 		this.compositeCanvas = document.createElement("canvas");
@@ -346,6 +353,59 @@ export class FrameRenderer {
 		this.backgroundSprite = bgCanvas;
 	}
 
+	private applyColorGrading(): void {
+		const f = this.colorMatrixFilter;
+		if (!f) return;
+		f.reset();
+		const cg = this.config.colorGrading;
+		if (!cg) return;
+
+		// Apply preset first, then manual adjustments
+		if (cg.preset && cg.preset !== "none") {
+			switch (cg.preset) {
+				case "vivid":
+					f.saturate(0.5, false);
+					f.contrast(0.1, false);
+					f.brightness(0.05, false);
+					break;
+				case "matte":
+					f.contrast(-0.1, false);
+					f.saturate(-0.2, false);
+					f.brightness(0.1, false);
+					break;
+				case "cinematic":
+					f.contrast(0.2, false);
+					f.saturate(-0.1, false);
+					f.brightness(-0.05, false);
+					break;
+				case "warm":
+					f.hue(15, false);
+					f.saturate(0.1, false);
+					f.brightness(0.05, false);
+					break;
+				case "cool":
+					f.hue(-15, false);
+					f.saturate(0.1, false);
+					f.brightness(-0.05, false);
+					break;
+				case "vintage":
+					f.saturate(-0.3, false);
+					f.contrast(0.1, false);
+					f.hue(10, false);
+					break;
+				case "noir":
+					f.desaturate();
+					f.contrast(0.2, false);
+					break;
+			}
+		}
+
+		if (cg.brightness !== 0) f.brightness(1 + cg.brightness, false);
+		if (cg.contrast !== 0) f.contrast(cg.contrast, false);
+		if (cg.saturation !== 0) f.saturate(cg.saturation, false);
+		if (cg.hue !== 0) f.hue(cg.hue, false);
+	}
+
 	async renderFrame(
 		videoFrame: VideoFrame,
 		timestamp: number,
@@ -433,6 +493,20 @@ export class FrameRenderer {
 				scaleFactor,
 			);
 		}
+
+		if (this.compositeCtx && this.config.colorGrading?.rgbCurves) {
+			this.applyRgbCurves(this.compositeCtx, this.config.width, this.config.height);
+		}
+	}
+
+	private applyRgbCurves(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+		const curves = this.config.colorGrading?.rgbCurves;
+		if (!curves) return;
+		const hasPoints = curves.rgb.length > 0 || curves.r.length > 0 || curves.g.length > 0 || curves.b.length > 0;
+		if (!hasPoints) return;
+		const imageData = ctx.getImageData(0, 0, w, h);
+		applyRgbCurvesToImageData(imageData, curves);
+		ctx.putImageData(imageData, 0, 0);
 	}
 
 	private updateLayout(webcamFrame?: VideoFrame | null): void {
@@ -833,6 +907,84 @@ export class FrameRenderer {
 		}
 	}
 
+	async renderTransitionFrame(
+		outgoingFrame: VideoFrame,
+		incomingFrame: VideoFrame,
+		timestamp: number,
+		transitionType: string,
+		transitionProgress: number,
+	): Promise<void> {
+		if (!this.compositeCanvas || !this.compositeCtx) {
+			throw new Error("Renderer not initialized");
+		}
+		const w = this.compositeCanvas.width;
+		const h = this.compositeCanvas.height;
+
+		// Render outgoing frame and snapshot it to an offscreen canvas
+		await this.renderFrame(outgoingFrame, timestamp, null);
+		const outgoingSnapshot = document.createElement("canvas");
+		outgoingSnapshot.width = w;
+		outgoingSnapshot.height = h;
+		outgoingSnapshot.getContext("2d")!.drawImage(this.compositeCanvas, 0, 0);
+
+		// Render incoming frame and snapshot it to an offscreen canvas
+		await this.renderFrame(incomingFrame, timestamp, null);
+		const incomingSnapshot = document.createElement("canvas");
+		incomingSnapshot.width = w;
+		incomingSnapshot.height = h;
+		incomingSnapshot.getContext("2d")!.drawImage(this.compositeCanvas, 0, 0);
+
+		// Blend outgoing and incoming onto compositeCanvas
+		const ctx = this.compositeCtx;
+		ctx.clearRect(0, 0, w, h);
+
+		switch (transitionType) {
+			case "fade":
+			case "dissolve": {
+				ctx.globalAlpha = 1;
+				ctx.drawImage(outgoingSnapshot, 0, 0);
+				ctx.globalAlpha = transitionProgress;
+				ctx.drawImage(incomingSnapshot, 0, 0);
+				ctx.globalAlpha = 1;
+				break;
+			}
+			case "wipe-left": {
+				ctx.drawImage(outgoingSnapshot, 0, 0);
+				ctx.save();
+				ctx.beginPath();
+				ctx.rect(0, 0, w * transitionProgress, h);
+				ctx.clip();
+				ctx.drawImage(incomingSnapshot, 0, 0);
+				ctx.restore();
+				break;
+			}
+			case "wipe-right": {
+				ctx.drawImage(outgoingSnapshot, 0, 0);
+				ctx.save();
+				ctx.beginPath();
+				ctx.rect(w * (1 - transitionProgress), 0, w, h);
+				ctx.clip();
+				ctx.drawImage(incomingSnapshot, 0, 0);
+				ctx.restore();
+				break;
+			}
+			case "slide-left": {
+				ctx.save();
+				ctx.translate(-w * transitionProgress, 0);
+				ctx.drawImage(outgoingSnapshot, 0, 0);
+				ctx.restore();
+				ctx.save();
+				ctx.translate(w * (1 - transitionProgress), 0);
+				ctx.drawImage(incomingSnapshot, 0, 0);
+				ctx.restore();
+				break;
+			}
+			default:
+				ctx.drawImage(incomingSnapshot, 0, 0);
+				break;
+		}
+	}
+
 	getCanvas(): HTMLCanvasElement {
 		if (!this.compositeCanvas) {
 			throw new Error("Renderer not initialized");
@@ -859,6 +1011,7 @@ export class FrameRenderer {
 		this.maskGraphics = null;
 		this.blurFilter = null;
 		this.motionBlurFilter = null;
+		this.colorMatrixFilter = null;
 		this.shadowCanvas = null;
 		this.shadowCtx = null;
 		this.compositeCanvas = null;

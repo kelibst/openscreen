@@ -8,6 +8,7 @@ import {
 	ipcMain,
 	Menu,
 	nativeImage,
+	Notification,
 	session,
 	systemPreferences,
 	Tray,
@@ -17,6 +18,7 @@ import { registerIpcHandlers } from "./ipc/handlers";
 import { createEditorWindow, createHudOverlayWindow, createSourceSelectorWindow } from "./windows";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const isLinux = process.platform === "linux";
 
 // Use Screen & System Audio Recording permissions instead of CoreAudio Tap API on macOS.
 // CoreAudio Tap requires NSAudioCaptureUsageDescription in the parent app's Info.plist,
@@ -66,11 +68,17 @@ const isMac = process.platform === "darwin";
 const trayIconSize = isMac ? 16 : 24;
 
 // Tray Icons
-const defaultTrayIcon = getTrayIcon("openscreen.png", trayIconSize);
+// On Linux use the pre-sized 24x24 icon from the icons directory to avoid
+// loading the full-resolution openscreen.png (873 KB) for a 24px slot.
+const defaultTrayIcon = isLinux
+	? nativeImage.createFromPath(
+			path.join(process.env.APP_ROOT || "", "icons/icons/png/24x24.png"),
+		)
+	: getTrayIcon("openscreen.png", trayIconSize);
 const recordingTrayIcon = getTrayIcon("rec-button.png", trayIconSize);
 
 function createWindow() {
-	mainWindow = createHudOverlayWindow();
+	createHudOverlayWindow();
 }
 
 function showMainWindow() {
@@ -191,6 +199,8 @@ function setupApplicationMenu() {
 	Menu.setApplicationMenu(menu);
 }
 
+const TRAY_NOTIFIED_KEY = "trayNotified";
+
 function createTray() {
 	tray = new Tray(defaultTrayIcon);
 	tray.on("click", () => {
@@ -198,6 +208,20 @@ function createTray() {
 	});
 	tray.on("double-click", () => {
 		showMainWindow();
+	});
+
+	// Show a one-time hint so users know the app lives in the notification bar
+	if (!app.isPackaged || !app.getPath("userData")) return;
+	const flagFile = path.join(app.getPath("userData"), TRAY_NOTIFIED_KEY);
+	fs.access(flagFile).catch(() => {
+		fs.writeFile(flagFile, "1").catch(() => {});
+		if (Notification.isSupported()) {
+			new Notification({
+				title: "OpenScreen",
+				body: "OpenScreen is running in the notification bar. Right-click the icon to open or quit.",
+				icon: path.join(process.env.APP_ROOT || "", "icons/icons/png/48x48.png"),
+			}).show();
+		}
 	});
 }
 
@@ -215,6 +239,9 @@ function updateTrayMenu(recording: boolean = false) {
 	if (!tray) return;
 	const trayIcon = recording ? recordingTrayIcon : defaultTrayIcon;
 	const trayToolTip = recording ? `Recording: ${selectedSourceName}` : "OpenScreen";
+
+	const openAtLogin = app.getLoginItemSettings().openAtLogin;
+
 	const menuTemplate = recording
 		? [
 				{
@@ -233,6 +260,17 @@ function updateTrayMenu(recording: boolean = false) {
 						showMainWindow();
 					},
 				},
+				{ type: "separator" as const },
+				{
+					label: "Open at Login",
+					type: "checkbox" as const,
+					checked: openAtLogin,
+					click: () => {
+						app.setLoginItemSettings({ openAtLogin: !openAtLogin });
+						updateTrayMenu();
+					},
+				},
+				{ type: "separator" as const },
 				{
 					label: mainT("common", "actions.quit") || "Quit",
 					click: () => {
@@ -380,7 +418,7 @@ app.whenReady().then(async () => {
 			isForceClosing = false;
 			mainWindow = null;
 		}
-		showMainWindow();
+		createHudOverlayWindow();
 	}
 
 	registerIpcHandlers(

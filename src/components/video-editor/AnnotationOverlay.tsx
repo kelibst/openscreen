@@ -8,6 +8,7 @@ import {
 import { cn } from "@/lib/utils";
 import { getArrowComponent } from "./ArrowSvgs";
 import {
+	type AnnotationKeyframe,
 	type AnnotationRegion,
 	type BlurData,
 	DEFAULT_BLUR_BLOCK_SIZE,
@@ -45,9 +46,13 @@ interface AnnotationOverlayProps {
 	onSizeChange: (id: string, size: { width: number; height: number }) => void;
 	onBlurDataChange?: (id: string, blurData: BlurData) => void;
 	onBlurDataCommit?: () => void;
+	onDrawingUpdate?: (id: string, pathPoints: Array<{ x: number; y: number }>) => void;
+	onAddKeyframe?: (id: string, keyframe: AnnotationKeyframe) => void;
+	onKeyframePositionChange?: (id: string, keyframeIndex: number, position: { x: number; y: number }) => void;
+	currentTimeMs?: number;
 	onClick: (id: string) => void;
 	zIndex: number;
-	isSelectedBoost: boolean; // Boost z-index when selected for easy editing
+	isSelectedBoost: boolean;
 	previewSourceCanvas?: PreviewCanvasSource | null;
 	previewFrameVersion?: number;
 }
@@ -61,6 +66,10 @@ export function AnnotationOverlay({
 	onSizeChange,
 	onBlurDataChange,
 	onBlurDataCommit,
+	onDrawingUpdate,
+	onAddKeyframe,
+	onKeyframePositionChange,
+	currentTimeMs,
 	onClick,
 	zIndex,
 	isSelectedBoost,
@@ -73,9 +82,12 @@ export function AnnotationOverlay({
 	const committedHeight = (annotation.size.height / 100) * containerHeight;
 	const blurShape = annotation.type === "blur" ? (annotation.blurData?.shape ?? "rectangle") : null;
 	const isSelectedFreehandBlur = isSelected && blurShape === "freehand";
+	const isDrawingAnnotation = annotation.type === "drawing" && isSelected;
 	const isDraggingRef = useRef(false);
 	const isDrawingFreehandRef = useRef(false);
 	const freehandPointsRef = useRef<Array<{ x: number; y: number }>>([]);
+	const isDrawingAnnotationRef = useRef(false);
+	const drawingPointsRef = useRef<Array<{ x: number; y: number }>>([]);
 	const [isFreehandDrawing, setIsFreehandDrawing] = useState(false);
 	const [draftFreehandPoints, setDraftFreehandPoints] = useState<Array<{ x: number; y: number }>>(
 		[],
@@ -280,6 +292,42 @@ export function AnnotationOverlay({
 			onBlurDataCommit?.();
 		}
 		setLivePointerPoint(null);
+	};
+
+	const normalizeDrawingPoint = (event: PointerEvent<SVGSVGElement>) => {
+		const rect = event.currentTarget.getBoundingClientRect();
+		return {
+			x: Math.max(0, Math.min(100, ((event.clientX - rect.left) / rect.width) * 100)),
+			y: Math.max(0, Math.min(100, ((event.clientY - rect.top) / rect.height) * 100)),
+		};
+	};
+
+	const handleDrawPointerDown = (event: PointerEvent<SVGSVGElement>) => {
+		if (!isDrawingAnnotation || !onDrawingUpdate) return;
+		event.preventDefault();
+		event.stopPropagation();
+		event.currentTarget.setPointerCapture(event.pointerId);
+		isDrawingAnnotationRef.current = true;
+		const pt = normalizeDrawingPoint(event);
+		drawingPointsRef.current = [pt];
+		onDrawingUpdate(annotation.id, [pt]);
+	};
+
+	const handleDrawPointerMove = (event: PointerEvent<SVGSVGElement>) => {
+		if (!isDrawingAnnotationRef.current || !onDrawingUpdate) return;
+		event.preventDefault();
+		const pt = normalizeDrawingPoint(event);
+		const pts = drawingPointsRef.current;
+		const last = pts[pts.length - 1];
+		if (last && Math.hypot(pt.x - last.x, pt.y - last.y) < 0.5) return;
+		drawingPointsRef.current = [...pts, pt];
+		onDrawingUpdate(annotation.id, drawingPointsRef.current);
+	};
+
+	const handleDrawPointerUp = (event: PointerEvent<SVGSVGElement>) => {
+		if (!isDrawingAnnotationRef.current) return;
+		isDrawingAnnotationRef.current = false;
+		try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* no-op */ }
 	};
 
 	const renderContent = () => {
@@ -495,12 +543,126 @@ export function AnnotationOverlay({
 				);
 			}
 
+			case "gif": {
+				const frames = annotation.gifFrames;
+				if (!frames || frames.length === 0) {
+					return (
+						<div className="w-full h-full flex items-center justify-center text-slate-400 text-sm">
+							No GIF frames
+						</div>
+					);
+				}
+				return (
+					<img
+						src={frames[0].dataUrl}
+						alt="GIF annotation"
+						className="w-full h-full object-contain"
+						draggable={false}
+					/>
+				);
+			}
+
+			case "drawing": {
+				const points = annotation.pathPoints ?? [];
+				const pathD =
+					points.length >= 2
+						? points.map((pt, i) => `${i === 0 ? "M" : "L"} ${pt.x} ${pt.y}`).join(" ")
+						: null;
+				return (
+					<svg
+						viewBox="0 0 100 100"
+						preserveAspectRatio="none"
+						className="absolute inset-0 w-full h-full"
+						style={{ cursor: isDrawingAnnotation ? "crosshair" : "default" }}
+						onPointerDown={handleDrawPointerDown}
+						onPointerMove={handleDrawPointerMove}
+						onPointerUp={handleDrawPointerUp}
+						onPointerCancel={handleDrawPointerUp}
+					>
+						{pathD && (
+							<path
+								d={pathD}
+								fill="none"
+								stroke={annotation.strokeColor ?? "#ff0000"}
+								strokeWidth={annotation.strokeWidth ?? 4}
+								strokeLinecap="round"
+								strokeLinejoin="round"
+								vectorEffect="non-scaling-stroke"
+							/>
+						)}
+					</svg>
+				);
+			}
+
 			default:
 				return null;
 		}
 	};
 
+	const positionKeyframes = (annotation.keyframes ?? [])
+		.filter((kf) => kf.properties.position)
+		.sort((a, b) => a.timeMs - b.timeMs);
+
+	const buildCatmullRomPath = (pts: Array<{ x: number; y: number }>): string => {
+		if (pts.length < 2) return "";
+		const toSvg = (p: { x: number; y: number }) => ({
+			x: (p.x / 100) * containerWidth,
+			y: (p.y / 100) * containerHeight,
+		});
+		const svgPts = pts.map(toSvg);
+		if (svgPts.length === 2) {
+			return `M ${svgPts[0].x} ${svgPts[0].y} L ${svgPts[1].x} ${svgPts[1].y}`;
+		}
+		let d = `M ${svgPts[0].x} ${svgPts[0].y}`;
+		for (let i = 0; i < svgPts.length - 1; i++) {
+			const p0 = svgPts[Math.max(0, i - 1)];
+			const p1 = svgPts[i];
+			const p2 = svgPts[i + 1];
+			const p3 = svgPts[Math.min(svgPts.length - 1, i + 2)];
+			const cp1x = p1.x + (p2.x - p0.x) / 6;
+			const cp1y = p1.y + (p2.y - p0.y) / 6;
+			const cp2x = p2.x - (p3.x - p1.x) / 6;
+			const cp2y = p2.y - (p3.y - p1.y) / 6;
+			d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`;
+		}
+		return d;
+	};
+
+	const handleAddKeyframe = () => {
+		if (!onAddKeyframe || currentTimeMs === undefined) return;
+		onAddKeyframe(annotation.id, {
+			timeMs: currentTimeMs,
+			properties: {
+				position: { ...annotation.position },
+				size: { ...annotation.size },
+			},
+		});
+	};
+
+	// Full-frame images render as a static background layer, not a draggable Rnd
+	if (annotation.type === "image" && annotation.imageFullFrame) {
+		const fit = annotation.imageFit ?? "cover";
+		const fitClass = fit === "fill" ? "object-fill" : fit === "contain" ? "object-contain" : "object-cover";
+		return (
+			<div
+				className={cn("absolute inset-0", isSelected && "ring-2 ring-[#34B27B]")}
+				style={{ zIndex, pointerEvents: isSelected ? "auto" : "none" }}
+				onClick={() => onClick(annotation.id)}
+			>
+				{annotation.content && annotation.content.startsWith("data:image") && (
+					<img
+						src={annotation.content}
+						alt="Background"
+						className={cn("w-full h-full", fitClass)}
+						draggable={false}
+					/>
+				)}
+			</div>
+		);
+	}
+
 	return (
+		<>
 		<Rnd
 			position={{ x, y }}
 			size={{ width, height }}
@@ -630,6 +792,75 @@ export function AnnotationOverlay({
 			>
 				{renderContent()}
 			</div>
+			{isSelected && onAddKeyframe && currentTimeMs !== undefined && (
+				<button
+					type="button"
+					onClick={(e) => { e.stopPropagation(); handleAddKeyframe(); }}
+					className="absolute -top-6 right-0 bg-[#34B27B] text-white text-[9px] px-1.5 py-0.5 rounded shadow pointer-events-auto z-10 whitespace-nowrap"
+					title="Add keyframe at current time"
+				>
+					◆ KF
+				</button>
+			)}
 		</Rnd>
+		{isSelected && positionKeyframes.length >= 2 && (
+			<svg
+				className="absolute inset-0 pointer-events-none overflow-visible"
+				style={{ width: containerWidth, height: containerHeight, left: 0, top: 0, position: "absolute", zIndex: zIndex + 500 }}
+			>
+				<path
+					d={buildCatmullRomPath(positionKeyframes.map((kf) => kf.properties.position!))}
+					fill="none"
+					stroke="#34B27B"
+					strokeWidth={1.5}
+					strokeDasharray="4 3"
+					opacity={0.7}
+				/>
+				{positionKeyframes.map((kf, idx) => {
+					const px = ((kf.properties.position?.x ?? 0) / 100) * containerWidth;
+					const py = ((kf.properties.position?.y ?? 0) / 100) * containerHeight;
+					return (
+						<g
+							key={idx}
+							style={{ pointerEvents: "all", cursor: "move" }}
+							onPointerDown={(e) => {
+								if (!onKeyframePositionChange) return;
+								e.stopPropagation();
+								const startX = e.clientX;
+								const startY = e.clientY;
+								const startPx = kf.properties.position?.x ?? 0;
+								const startPy = kf.properties.position?.y ?? 0;
+								const onMove = (me: globalThis.PointerEvent) => {
+									const dx = ((me.clientX - startX) / containerWidth) * 100;
+									const dy = ((me.clientY - startY) / containerHeight) * 100;
+									onKeyframePositionChange(annotation.id, idx, {
+										x: Math.max(0, Math.min(100, startPx + dx)),
+										y: Math.max(0, Math.min(100, startPy + dy)),
+									});
+								};
+								const onUp = () => {
+									window.removeEventListener("pointermove", onMove);
+									window.removeEventListener("pointerup", onUp);
+								};
+								window.addEventListener("pointermove", onMove);
+								window.addEventListener("pointerup", onUp);
+							}}
+						>
+							<rect
+								x={px - 5}
+								y={py - 5}
+								width={10}
+								height={10}
+								fill="#34B27B"
+								stroke="white"
+								strokeWidth={1.5}
+								transform={`rotate(45 ${px} ${py})`}
+							/>
+						</g>
+					);
+				})}
+			</svg>
+		)}
+	</>
 	);
 }

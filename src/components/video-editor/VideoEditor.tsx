@@ -37,6 +37,10 @@ import {
 	getNativeAspectRatioValue,
 	isPortraitAspectRatio,
 } from "@/utils/aspectRatioUtils";
+import AudioSettingsPanel from "./AudioSettingsPanel";
+import ClipSettingsPanel from "./ClipSettingsPanel";
+import StickerPickerPanel from "./StickerPickerPanel";
+import TextPresetsPanel from "./TextPresetsPanel";
 import { ExportDialog } from "./ExportDialog";
 import PlaybackControls from "./PlaybackControls";
 import {
@@ -53,13 +57,19 @@ import {
 import { SettingsPanel } from "./SettingsPanel";
 import TimelineEditor from "./timeline/TimelineEditor";
 import {
+	type AnnotationKeyframe,
 	type AnnotationRegion,
+	type AudioRegion,
 	type BlurData,
+	type ClipRegion,
+	type ColorGrading,
 	type CursorTelemetryPoint,
+	type TransitionType,
 	clampFocusToDepth,
 	DEFAULT_ANNOTATION_POSITION,
 	DEFAULT_ANNOTATION_SIZE,
 	DEFAULT_ANNOTATION_STYLE,
+	DEFAULT_AUDIO_VOLUME,
 	DEFAULT_BLUR_DATA,
 	DEFAULT_FIGURE_DATA,
 	DEFAULT_PLAYBACK_SPEED,
@@ -91,6 +101,8 @@ export default function VideoEditor() {
 		trimRegions,
 		speedRegions,
 		annotationRegions,
+		audioRegions,
+		clipRegions,
 		cropRegion,
 		wallpaper,
 		shadowIntensity,
@@ -103,6 +115,7 @@ export default function VideoEditor() {
 		webcamMaskShape,
 		webcamSizePreset,
 		webcamPosition,
+		colorGrading,
 	} = editorState;
 
 	// ── Non-undoable state
@@ -126,6 +139,8 @@ export default function VideoEditor() {
 	const [selectedSpeedId, setSelectedSpeedId] = useState<string | null>(null);
 	const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
 	const [selectedBlurId, setSelectedBlurId] = useState<string | null>(null);
+	const [selectedAudioId, setSelectedAudioId] = useState<string | null>(null);
+	const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 	const [isExporting, setIsExporting] = useState(false);
 	const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
 	const [exportError, setExportError] = useState<string | null>(null);
@@ -144,6 +159,8 @@ export default function VideoEditor() {
 		format: string;
 	} | null>(null);
 	const [isFullscreen, setIsFullscreen] = useState(false);
+	const [showStickerPicker, setShowStickerPicker] = useState(false);
+	const [showTextPresets, setShowTextPresets] = useState(false);
 
 	const playerContainerRef = useRef<HTMLDivElement>(null);
 	const videoPlaybackRef = useRef<VideoPlaybackRef>(null);
@@ -160,6 +177,8 @@ export default function VideoEditor() {
 
 	const nextAnnotationIdRef = useRef(1);
 	const nextAnnotationZIndexRef = useRef(1);
+	const nextAudioIdRef = useRef(1);
+	const nextClipIdRef = useRef(1);
 	const exporterRef = useRef<VideoExporter | null>(null);
 
 	const annotationOnlyRegions = useMemo(
@@ -227,6 +246,9 @@ export default function VideoEditor() {
 				trimRegions: normalizedEditor.trimRegions,
 				speedRegions: normalizedEditor.speedRegions,
 				annotationRegions: normalizedEditor.annotationRegions,
+				audioRegions: normalizedEditor.audioRegions,
+				clipRegions: normalizedEditor.clipRegions,
+				colorGrading: normalizedEditor.colorGrading,
 				aspectRatio: normalizedEditor.aspectRatio,
 				webcamLayoutPreset: normalizedEditor.webcamLayoutPreset,
 				webcamMaskShape: normalizedEditor.webcamMaskShape,
@@ -244,6 +266,8 @@ export default function VideoEditor() {
 			setSelectedSpeedId(null);
 			setSelectedAnnotationId(null);
 			setSelectedBlurId(null);
+			setSelectedAudioId(null);
+			setSelectedClipId(null);
 
 			nextZoomIdRef.current = deriveNextId(
 				"zoom",
@@ -296,6 +320,9 @@ export default function VideoEditor() {
 			trimRegions,
 			speedRegions,
 			annotationRegions,
+			audioRegions,
+			clipRegions,
+			colorGrading,
 			aspectRatio,
 			webcamLayoutPreset,
 			webcamMaskShape,
@@ -319,6 +346,8 @@ export default function VideoEditor() {
 		trimRegions,
 		speedRegions,
 		annotationRegions,
+		audioRegions,
+		clipRegions,
 		aspectRatio,
 		webcamLayoutPreset,
 		webcamMaskShape,
@@ -440,6 +469,9 @@ export default function VideoEditor() {
 				trimRegions,
 				speedRegions,
 				annotationRegions,
+				audioRegions,
+				clipRegions,
+				colorGrading,
 				aspectRatio,
 				webcamLayoutPreset,
 				webcamMaskShape,
@@ -514,6 +546,27 @@ export default function VideoEditor() {
 	useEffect(() => {
 		window.electronAPI.setHasUnsavedChanges(hasUnsavedChanges);
 	}, [hasUnsavedChanges]);
+
+	// Synthesize the primary ClipRegion once we know the video duration.
+	// This ensures the clip row is always populated with at least the recording.
+	useEffect(() => {
+		if (duration > 0 && videoSourcePath && clipRegions.length === 0) {
+			pushState(() => ({
+				clipRegions: [
+					{
+						id: "clip-primary",
+						startMs: 0,
+						endMs: Math.round(duration * 1000),
+						sourceOffsetMs: 0,
+						sourcePath: videoSourcePath,
+						label: "Primary Recording",
+					},
+				],
+			}));
+		}
+		// Only run when duration or video path changes; clipRegions check prevents re-triggering
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [duration, videoSourcePath]);
 
 	useEffect(() => {
 		const cleanup = window.electronAPI.onRequestSaveBeforeClose(async () => {
@@ -645,6 +698,8 @@ export default function VideoEditor() {
 			setSelectedTrimId(null);
 			setSelectedAnnotationId(null);
 			setSelectedBlurId(null);
+			setSelectedAudioId(null);
+			setSelectedClipId(null);
 		}
 	}, []);
 
@@ -903,6 +958,320 @@ export default function VideoEditor() {
 		[selectedSpeedId, pushState],
 	);
 
+	// ── Audio region handlers ───────────────────────────────────────────────
+	const handleSelectAudio = useCallback((id: string | null) => {
+		setSelectedAudioId(id);
+		if (id) {
+			setSelectedZoomId(null);
+			setSelectedTrimId(null);
+			setSelectedAnnotationId(null);
+			setSelectedBlurId(null);
+			setSelectedClipId(null);
+		}
+	}, []);
+
+	function autoAssignTrackIndex(existing: AudioRegion[], newSpan: { startMs: number; endMs: number }): number {
+		let idx = 0;
+		while (true) {
+			const occupied = existing
+				.filter((r) => (r.trackIndex ?? 0) === idx)
+				.some((r) => newSpan.endMs > r.startMs && newSpan.startMs < r.endMs);
+			if (!occupied) return idx;
+			idx++;
+		}
+	}
+
+	const handleAudioAdded = useCallback(
+		(_span: Span, sourcePath: string, label: string) => {
+			const id = `audio-${nextAudioIdRef.current++}`;
+			const startMs = Math.round(_span.start);
+			const endMs = Math.round(_span.end);
+			pushState((prev) => {
+				const trackIndex = autoAssignTrackIndex(prev.audioRegions, { startMs, endMs });
+				const newRegion: AudioRegion = {
+					id,
+					startMs,
+					endMs,
+					sourceOffsetMs: 0,
+					sourcePath,
+					volume: DEFAULT_AUDIO_VOLUME,
+					label,
+					trackIndex,
+				};
+				return { audioRegions: [...prev.audioRegions, newRegion] };
+			});
+			setSelectedAudioId(id);
+			setSelectedZoomId(null);
+			setSelectedAnnotationId(null);
+		},
+		[pushState],
+	);
+
+	const handleAudioSpanChange = useCallback(
+		(id: string, span: Span) => {
+			pushState((prev) => ({
+				audioRegions: prev.audioRegions.map((r) =>
+					r.id === id ? { ...r, startMs: Math.round(span.start), endMs: Math.round(span.end) } : r,
+				),
+			}));
+		},
+		[pushState],
+	);
+
+	const handleAudioDelete = useCallback(
+		(id: string) => {
+			pushState((prev) => ({ audioRegions: prev.audioRegions.filter((r) => r.id !== id) }));
+			if (selectedAudioId === id) setSelectedAudioId(null);
+		},
+		[selectedAudioId, pushState],
+	);
+
+	const handleAudioVolumeChange = useCallback(
+		(id: string, volume: number) => {
+			pushState((prev) => ({
+				audioRegions: prev.audioRegions.map((r) => (r.id === id ? { ...r, volume } : r)),
+			}));
+		},
+		[pushState],
+	);
+
+	const handleAudioLabelChange = useCallback(
+		(id: string, label: string) => {
+			pushState((prev) => ({
+				audioRegions: prev.audioRegions.map((r) => (r.id === id ? { ...r, label } : r)),
+			}));
+		},
+		[pushState],
+	);
+
+	const handleAudioEqualizerChange = useCallback(
+		(id: string, equalizer: import("./types").AudioEqualizer) => {
+			pushState((prev) => ({
+				audioRegions: prev.audioRegions.map((r) => (r.id === id ? { ...r, equalizer } : r)),
+			}));
+		},
+		[pushState],
+	);
+
+	const handleAudioFadeChange = useCallback(
+		(id: string, fadeInMs: number, fadeOutMs: number) => {
+			pushState((prev) => ({
+				audioRegions: prev.audioRegions.map((r) => (r.id === id ? { ...r, fadeInMs, fadeOutMs } : r)),
+			}));
+		},
+		[pushState],
+	);
+
+	// ── Clip region handlers ─────────────────────────────────────────────────
+	const handleSelectClip = useCallback((id: string | null) => {
+		setSelectedClipId(id);
+		if (id) {
+			setSelectedZoomId(null);
+			setSelectedTrimId(null);
+			setSelectedAnnotationId(null);
+			setSelectedAudioId(null);
+		}
+	}, []);
+
+	const handleClipAdded = useCallback(
+		(_span: Span, sourcePath: string, label: string) => {
+			const id = `clip-${nextClipIdRef.current++}`;
+			const newRegion: ClipRegion = {
+				id,
+				startMs: Math.round(_span.start),
+				endMs: Math.round(_span.end),
+				sourceOffsetMs: 0,
+				sourcePath,
+				label,
+			};
+			pushState((prev) => ({ clipRegions: [...prev.clipRegions, newRegion] }));
+			setSelectedClipId(id);
+			setSelectedZoomId(null);
+			setSelectedAnnotationId(null);
+		},
+		[pushState],
+	);
+
+	const handleClipSpanChange = useCallback(
+		(id: string, span: Span) => {
+			pushState((prev) => ({
+				clipRegions: prev.clipRegions.map((r) =>
+					r.id === id ? { ...r, startMs: Math.round(span.start), endMs: Math.round(span.end) } : r,
+				),
+			}));
+		},
+		[pushState],
+	);
+
+	const handleClipDelete = useCallback(
+		(id: string) => {
+			pushState((prev) => {
+				const deleted = prev.clipRegions.find((r) => r.id === id);
+				if (!deleted) return {};
+				const deletedDuration = deleted.endMs - deleted.startMs;
+				return {
+					clipRegions: prev.clipRegions
+						.filter((r) => r.id !== id)
+						.map((r) =>
+							r.startMs >= deleted.endMs
+								? { ...r, startMs: r.startMs - deletedDuration, endMs: r.endMs - deletedDuration }
+								: r,
+						),
+				};
+			});
+			if (selectedClipId === id) setSelectedClipId(null);
+		},
+		[selectedClipId, pushState],
+	);
+
+	const handleClipLabelChange = useCallback(
+		(id: string, label: string) => {
+			pushState((prev) => ({
+				clipRegions: prev.clipRegions.map((r) => (r.id === id ? { ...r, label } : r)),
+			}));
+		},
+		[pushState],
+	);
+
+	const handleClipTransitionChange = useCallback(
+		(id: string, transition: TransitionType, durationMs: number) => {
+			pushState((prev) => ({
+				clipRegions: prev.clipRegions.map((r) =>
+					r.id === id
+						? { ...r, transitionIn: transition, transitionInDurationMs: durationMs }
+						: r,
+				),
+			}));
+		},
+		[pushState],
+	);
+
+	const handleClipUpdate = useCallback(
+		(id: string, patch: Partial<ClipRegion>) => {
+			pushState((prev) => ({
+				clipRegions: prev.clipRegions.map((r) => r.id === id ? { ...r, ...patch } : r),
+			}));
+		},
+		[pushState],
+	);
+
+	const handleExtractAudio = useCallback(
+		(outputPath: string, startMs: number, sourceOffsetMs: number) => {
+			const newRegion: import("./types").AudioRegion = {
+				id: `audio-${Date.now()}`,
+				startMs,
+				endMs: startMs + 5000,
+				sourceOffsetMs,
+				sourcePath: outputPath,
+				volume: 1.0,
+			};
+			pushState((prev) => ({
+				audioRegions: [...prev.audioRegions, newRegion],
+			}));
+		},
+		[pushState],
+	);
+
+	const splitRegionAtPlayhead = useCallback(() => {
+		const currentTimeMs = currentTimeRef.current * 1000;
+		pushState((prev) => {
+			function splitRegions<T extends { id: string; startMs: number; endMs: number }>(
+				regions: T[],
+				makeSecondId: () => string,
+				adjustSecond?: (region: T, splitMs: number) => Partial<T>,
+			): T[] {
+				const next: T[] = [];
+				for (const region of regions) {
+					if (currentTimeMs > region.startMs && currentTimeMs < region.endMs) {
+						const first: T = { ...region, endMs: currentTimeMs };
+						const second: T = {
+							...region,
+							id: makeSecondId(),
+							startMs: currentTimeMs,
+							...(adjustSecond ? adjustSecond(region, currentTimeMs) : {}),
+						};
+						next.push(first, second);
+					} else {
+						next.push(region);
+					}
+				}
+				return next;
+			}
+
+			return {
+				clipRegions: splitRegions(
+					prev.clipRegions,
+					() => `clip-${nextClipIdRef.current++}`,
+					(region, splitMs) => ({
+						sourceOffsetMs: region.sourceOffsetMs + (splitMs - region.startMs),
+						transitionIn: undefined,
+						transitionInDurationMs: undefined,
+					}),
+				),
+				audioRegions: splitRegions(
+					prev.audioRegions,
+					() => `audio-${nextAudioIdRef.current++}`,
+					(region, splitMs) => ({
+						sourceOffsetMs: region.sourceOffsetMs + (splitMs - region.startMs),
+					}),
+				),
+				zoomRegions: splitRegions(
+					prev.zoomRegions,
+					() => `zoom-${nextZoomIdRef.current++}`,
+				),
+				trimRegions: splitRegions(
+					prev.trimRegions,
+					() => `trim-${nextTrimIdRef.current++}`,
+				),
+				speedRegions: splitRegions(
+					prev.speedRegions,
+					() => `speed-${nextSpeedIdRef.current++}`,
+				),
+				annotationRegions: splitRegions(
+					prev.annotationRegions,
+					() => `annotation-${nextAnnotationIdRef.current++}`,
+				),
+			};
+		});
+	}, [pushState]);
+
+	const handleImageAdded = useCallback(
+		async (sourcePath: string) => {
+			const id = `annotation-${nextAnnotationIdRef.current++}`;
+			const zIndex = nextAnnotationZIndexRef.current++;
+			const fileUrl = sourcePath.startsWith("file://") ? sourcePath : `file://${sourcePath}`;
+			let dataUrl = fileUrl;
+			try {
+				const resp = await fetch(fileUrl);
+				const blob = await resp.blob();
+				dataUrl = await new Promise<string>((res) => {
+					const reader = new FileReader();
+					reader.onload = (e) => res(e.target!.result as string);
+					reader.readAsDataURL(blob);
+				});
+			} catch {
+				dataUrl = fileUrl;
+			}
+			const startMs = Math.round(currentTimeRef.current * 1000);
+			const newRegion: AnnotationRegion = {
+				id,
+				startMs,
+				endMs: startMs + 3000,
+				type: "image",
+				content: dataUrl,
+				imageFullFrame: true,
+				imageFit: "cover",
+				position: { x: 0, y: 0 },
+				size: { ...DEFAULT_ANNOTATION_SIZE },
+				style: { ...DEFAULT_ANNOTATION_STYLE },
+				zIndex,
+			};
+			pushState((prev) => ({ annotationRegions: [...prev.annotationRegions, newRegion] }));
+			setSelectedAnnotationId(id);
+		},
+		[pushState],
+	);
+
 	const handleAnnotationAdded = useCallback(
 		(span: Span) => {
 			const id = `annotation-${nextAnnotationIdRef.current++}`;
@@ -1002,6 +1371,48 @@ export default function VideoEditor() {
 		[selectedAnnotationId, selectedBlurId, pushState],
 	);
 
+	const handleAutoCaptions = useCallback(async () => {
+		if (!videoSourcePath) {
+			toast.error("No video loaded");
+			return;
+		}
+		if (!window.electronAPI?.transcribeAudio) {
+			toast.error("Transcription not available");
+			return;
+		}
+		toast.info("Running Whisper transcription...");
+		const result = await window.electronAPI.transcribeAudio(videoSourcePath);
+		if (!result.success || !result.segments) {
+			toast.error(result.error ?? "Transcription failed");
+			return;
+		}
+		const newRegions: AnnotationRegion[] = result.segments.map((seg, idx) => {
+			const wordTimings = seg.words?.map((w) => ({
+				word: w.word.trim(),
+				startMs: Math.round(w.start * 1000),
+				endMs: Math.round(w.end * 1000),
+			})) ?? [];
+			return {
+				id: `annotation-${nextAnnotationIdRef.current++}`,
+				startMs: Math.round(seg.start * 1000),
+				endMs: Math.round(seg.end * 1000),
+				type: "text" as const,
+				content: seg.text.trim(),
+				position: { x: 10, y: 85 },
+				size: { width: 80, height: 10 },
+				style: { ...DEFAULT_ANNOTATION_STYLE, fontSize: 24 },
+				zIndex: nextAnnotationZIndexRef.current + idx,
+				isSubtitle: true,
+				wordTimings: wordTimings.length > 0 ? wordTimings : undefined,
+			};
+		});
+		nextAnnotationZIndexRef.current += result.segments.length;
+		pushState((prev) => ({
+			annotationRegions: [...prev.annotationRegions, ...newRegions],
+		}));
+		toast.success(`Added ${newRegions.length} caption regions`);
+	}, [videoSourcePath, pushState]);
+
 	const handleAnnotationContentChange = useCallback(
 		(id: string, content: string) => {
 			pushState((prev) => ({
@@ -1067,6 +1478,24 @@ export default function VideoEditor() {
 		[pushState],
 	);
 
+	const handleAnnotationPatchChange = useCallback(
+		(id: string, patch: Partial<AnnotationRegion>) => {
+			pushState((prev) => ({
+				annotationRegions: prev.annotationRegions.map((region) =>
+					region.id === id ? { ...region, ...patch } : region,
+				),
+			}));
+		},
+		[pushState],
+	);
+
+	const handleColorGradingChange = useCallback(
+		(cg: ColorGrading) => {
+			pushState(() => ({ colorGrading: cg }));
+		},
+		[pushState],
+	);
+
 	const handleAnnotationFigureDataChange = useCallback(
 		(id: string, figureData: FigureData) => {
 			pushState((prev) => ({
@@ -1074,6 +1503,117 @@ export default function VideoEditor() {
 					region.id === id ? { ...region, figureData } : region,
 				),
 			}));
+		},
+		[pushState],
+	);
+
+	const handleAddSticker = useCallback(
+		(partial: Omit<AnnotationRegion, "id" | "zIndex">) => {
+			const id = `annotation-${nextAnnotationIdRef.current++}`;
+			const zIndex = nextAnnotationZIndexRef.current++;
+			const startMs = Math.round(currentTimeRef.current * 1000);
+			const newRegion: AnnotationRegion = {
+				...partial,
+				id,
+				zIndex,
+				startMs,
+				endMs: startMs + 3000,
+			};
+			pushState((prev) => ({
+				annotationRegions: [...prev.annotationRegions, newRegion],
+			}));
+			setSelectedAnnotationId(id);
+		},
+		[pushState],
+	);
+
+	const handleAddDrawing = useCallback(() => {
+		const id = `annotation-${nextAnnotationIdRef.current++}`;
+		const zIndex = nextAnnotationZIndexRef.current++;
+		const startMs = Math.round(currentTimeRef.current * 1000);
+		const newRegion: AnnotationRegion = {
+			id,
+			startMs,
+			endMs: startMs + 3000,
+			type: "drawing",
+			content: "",
+			position: { x: 0, y: 0 },
+			size: { width: 100, height: 100 },
+			style: { ...DEFAULT_ANNOTATION_STYLE },
+			zIndex,
+			pathPoints: [],
+			strokeColor: "#ff0000",
+			strokeWidth: 4,
+		};
+		pushState((prev) => ({
+			annotationRegions: [...prev.annotationRegions, newRegion],
+		}));
+		setSelectedAnnotationId(id);
+	}, [pushState]);
+
+	const handleDrawingUpdate = useCallback(
+		(id: string, pathPoints: Array<{ x: number; y: number }>) => {
+			updateState((prev) => ({
+				annotationRegions: prev.annotationRegions.map((region) =>
+					region.id === id ? { ...region, pathPoints } : region,
+				),
+			}));
+		},
+		[updateState],
+	);
+
+	const handleAnnotationAddKeyframe = useCallback(
+		(id: string, keyframe: AnnotationKeyframe) => {
+			pushState((prev) => ({
+				annotationRegions: prev.annotationRegions.map((region) => {
+					if (region.id !== id) return region;
+					const existing = region.keyframes ?? [];
+					const withoutSameTime = existing.filter((kf) => Math.abs(kf.timeMs - keyframe.timeMs) > 50);
+					return { ...region, keyframes: [...withoutSameTime, keyframe].sort((a, b) => a.timeMs - b.timeMs) };
+				}),
+			}));
+		},
+		[pushState],
+	);
+
+	const handleKeyframePositionChange = useCallback(
+		(id: string, keyframeIndex: number, position: { x: number; y: number }) => {
+			updateState((prev) => ({
+				annotationRegions: prev.annotationRegions.map((region) => {
+					if (region.id !== id || !region.keyframes) return region;
+					const sorted = [...region.keyframes].sort((a, b) => a.timeMs - b.timeMs);
+					if (keyframeIndex >= sorted.length) return region;
+					const updated = sorted.map((kf, i) =>
+						i === keyframeIndex ? { ...kf, properties: { ...kf.properties, position } } : kf,
+					);
+					return { ...region, keyframes: updated };
+				}),
+			}));
+		},
+		[updateState],
+	);
+
+	const handleApplyTextPreset = useCallback(
+		(partial: Partial<AnnotationRegion>) => {
+			const id = `annotation-${nextAnnotationIdRef.current++}`;
+			const zIndex = nextAnnotationZIndexRef.current++;
+			const startMs = Math.round(currentTimeRef.current * 1000);
+			const newRegion: AnnotationRegion = {
+				id,
+				startMs,
+				endMs: startMs + 3000,
+				type: "text",
+				content: "Text",
+				position: { x: 35, y: 45 },
+				size: { width: 30, height: 15 },
+				style: { ...DEFAULT_ANNOTATION_STYLE },
+				zIndex,
+				...partial,
+			};
+			pushState((prev) => ({
+				annotationRegions: [...prev.annotationRegions, newRegion],
+			}));
+			setSelectedAnnotationId(id);
 		},
 		[pushState],
 	);
@@ -1215,11 +1755,16 @@ export default function VideoEditor() {
 					playback.video.paused ? playback.play().catch(console.error) : playback.pause();
 				}
 			}
+
+			if (e.key === "s" && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && !isInput) {
+				e.preventDefault();
+				splitRegionAtPlayhead();
+			}
 		};
 
 		window.addEventListener("keydown", handleKeyDown, { capture: true });
 		return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
-	}, [undo, redo, shortcuts, isMac]);
+	}, [undo, redo, shortcuts, isMac, splitRegionAtPlayhead]);
 
 	useEffect(() => {
 		if (selectedZoomId && !zoomRegions.some((region) => region.id === selectedZoomId)) {
@@ -1400,7 +1945,8 @@ export default function VideoEditor() {
 						toast.error(result.error || "GIF export failed");
 					}
 				} else {
-					// MP4 Export
+					// MP4 / WebM Export
+					const isWebM = settings.format === "webm";
 					const quality = settings.quality || exportQuality;
 					let exportWidth: number;
 					let exportHeight: number;
@@ -1484,7 +2030,8 @@ export default function VideoEditor() {
 						height: exportHeight,
 						frameRate: 60,
 						bitrate,
-						codec: "avc1.640033",
+						codec: isWebM ? "vp09.00.10.08" : "avc1.640033",
+						format: settings.format,
 						wallpaper,
 						zoomRegions,
 						trimRegions,
@@ -1497,6 +2044,11 @@ export default function VideoEditor() {
 						padding,
 						cropRegion,
 						annotationRegions,
+						audioRegions,
+						clipRegions: clipRegions.length > 0 ? clipRegions : undefined,
+						colorGrading,
+						primaryAudioVolume: editorState.primaryAudioVolume ?? 1.0,
+						primaryAudioMuted: editorState.primaryAudioMuted ?? false,
 						webcamLayoutPreset,
 						webcamMaskShape,
 						webcamSizePreset,
@@ -1515,12 +2067,13 @@ export default function VideoEditor() {
 					if (result.success && result.blob) {
 						const arrayBuffer = await result.blob.arrayBuffer();
 						const timestamp = Date.now();
-						const fileName = `export-${timestamp}.mp4`;
+						const ext = isWebM ? "webm" : "mp4";
+						const fileName = `export-${timestamp}.${ext}`;
 
 						const saveResult = await window.electronAPI.saveExportedVideo(arrayBuffer, fileName);
 
 						if (saveResult.canceled) {
-							setUnsavedExport({ arrayBuffer, fileName, format: "mp4" });
+							setUnsavedExport({ arrayBuffer, fileName, format: ext });
 							toast.info("Export canceled");
 						} else if (saveResult.success && saveResult.path) {
 							setUnsavedExport(null);
@@ -1830,12 +2383,18 @@ export default function VideoEditor() {
 											onBlurSizeChange={handleAnnotationSizeChange}
 											onBlurDataChange={handleBlurDataPreviewChange}
 											onBlurDataCommit={commitState}
+											onDrawingUpdate={handleDrawingUpdate}
 											cursorTelemetry={cursorTelemetry}
+											clipRegions={clipRegions}
+											faceBlurEnabled={editorState.faceBlurEnabled ?? false}
+											bgRemovalEnabled={editorState.bgRemovalEnabled ?? false}
+											onAddKeyframe={handleAnnotationAddKeyframe}
+											onKeyframePositionChange={handleKeyframePositionChange}
 										/>
 									</div>
 								</div>
 								{/* Playback controls */}
-								<div className="w-full flex justify-center items-center h-12 flex-shrink-0 px-3 py-1.5 my-1.5">
+								<div className="w-full flex justify-center items-center h-12 flex-shrink-0 px-3 py-1.5 my-1.5 gap-2">
 									<div className="w-full max-w-[700px]">
 										<PlaybackControls
 											isPlaying={isPlaying}
@@ -1847,6 +2406,17 @@ export default function VideoEditor() {
 											onSeek={handleSeek}
 										/>
 									</div>
+									<button
+										type="button"
+										onClick={splitRegionAtPlayhead}
+										title="Split at playhead (S)"
+										className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-white/10 bg-white/5 text-slate-400 hover:bg-white/10 hover:text-slate-200 transition-all text-[10px] font-medium flex-shrink-0"
+									>
+										<svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" className="flex-shrink-0">
+											<path d="M6 1v10M2 4l4-3 4 3M2 8l4 3 4-3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+										</svg>
+										Split
+									</button>
 								</div>
 							</div>
 						</Panel>
@@ -1895,6 +2465,20 @@ export default function VideoEditor() {
 									onBlurDelete={handleAnnotationDelete}
 									selectedBlurId={selectedBlurId}
 									onSelectBlur={handleSelectBlur}
+									audioRegions={audioRegions}
+									onAudioAdded={handleAudioAdded}
+									onAudioSpanChange={handleAudioSpanChange}
+									onAudioDelete={handleAudioDelete}
+									onAudioVolumeChange={handleAudioVolumeChange}
+									selectedAudioId={selectedAudioId}
+									onSelectAudio={handleSelectAudio}
+									clipRegions={clipRegions}
+									onClipAdded={handleClipAdded}
+									onClipSpanChange={handleClipSpanChange}
+									onClipDelete={handleClipDelete}
+									selectedClipId={selectedClipId}
+									onSelectClip={handleSelectClip}
+									onImageAdded={handleImageAdded}
 									aspectRatio={aspectRatio}
 									onAspectRatioChange={(ar) =>
 										pushState({
@@ -1906,6 +2490,15 @@ export default function VideoEditor() {
 													: webcamLayoutPreset,
 										})
 									}
+									trackState={editorState.trackState}
+									onTrackStateChange={(rowId, patch) =>
+										pushState((prev) => ({
+											trackState: {
+												...prev.trackState,
+												[rowId]: { ...(prev.trackState[rowId] ?? { muted: false, locked: false, label: rowId }), ...patch },
+											},
+										}))
+									}
 								/>
 							</div>
 						</Panel>
@@ -1913,7 +2506,39 @@ export default function VideoEditor() {
 				</div>
 
 				{/* Right section: settings panel */}
-				<div className="flex-[3] min-w-[280px] max-w-[420px] h-full">
+				<div className="flex-[3] min-w-[280px] max-w-[420px] h-full relative flex flex-col gap-2">
+					<div className="flex gap-1 flex-shrink-0">
+						<button
+							type="button"
+							onClick={() => { setShowStickerPicker((v) => !v); setShowTextPresets(false); }}
+							className={`flex-1 px-2 py-1.5 rounded-lg text-[10px] font-medium border transition-colors ${showStickerPicker ? "bg-[#34B27B]/20 border-[#34B27B]/50 text-[#34B27B]" : "bg-white/5 border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-200"}`}
+						>
+							😀 Stickers
+						</button>
+						<button
+							type="button"
+							onClick={() => { setShowTextPresets((v) => !v); setShowStickerPicker(false); }}
+							className={`flex-1 px-2 py-1.5 rounded-lg text-[10px] font-medium border transition-colors ${showTextPresets ? "bg-[#34B27B]/20 border-[#34B27B]/50 text-[#34B27B]" : "bg-white/5 border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-200"}`}
+						>
+							Aa Presets
+						</button>
+						<button
+							type="button"
+							onClick={handleAddDrawing}
+							className="flex-1 px-2 py-1.5 rounded-lg text-[10px] font-medium border bg-white/5 border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-200 transition-colors"
+						>
+							✏️ Draw
+						</button>
+						<button
+							type="button"
+							onClick={handleAutoCaptions}
+							className="flex-1 px-2 py-1.5 rounded-lg text-[10px] font-medium border bg-white/5 border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-200 transition-colors"
+							title="Auto Captions via Whisper"
+						>
+							CC Auto
+						</button>
+					</div>
+					<div className="flex-1 relative min-h-0">
 					<SettingsPanel
 						selected={wallpaper}
 						onWallpaperChange={(w) => pushState({ wallpaper: w })}
@@ -1949,6 +2574,16 @@ export default function VideoEditor() {
 						cropRegion={cropRegion}
 						onCropChange={(r) => pushState({ cropRegion: r })}
 						aspectRatio={aspectRatio}
+						onAspectRatioChange={(ar) =>
+							pushState({
+								aspectRatio: ar,
+								webcamLayoutPreset:
+									(isPortraitAspectRatio(ar) && webcamLayoutPreset === "dual-frame") ||
+									(!isPortraitAspectRatio(ar) && webcamLayoutPreset === "vertical-stack")
+										? "picture-in-picture"
+										: webcamLayoutPreset,
+							})
+						}
 						hasWebcam={Boolean(webcamVideoPath)}
 						webcamLayoutPreset={webcamLayoutPreset}
 						onWebcamLayoutPresetChange={(preset) =>
@@ -1992,8 +2627,11 @@ export default function VideoEditor() {
 						onAnnotationContentChange={handleAnnotationContentChange}
 						onAnnotationTypeChange={handleAnnotationTypeChange}
 						onAnnotationStyleChange={handleAnnotationStyleChange}
+						onAnnotationPatchChange={handleAnnotationPatchChange}
 						onAnnotationFigureDataChange={handleAnnotationFigureDataChange}
 						onAnnotationDelete={handleAnnotationDelete}
+						colorGrading={colorGrading}
+						onColorGradingChange={handleColorGradingChange}
 						selectedBlurId={selectedBlurId}
 						blurRegions={blurRegions}
 						onBlurDataChange={handleBlurDataPanelChange}
@@ -2024,7 +2662,51 @@ export default function VideoEditor() {
 						onZoomDurationChange={(zoomIn, zoomOut) =>
 							selectedZoomId && handleZoomDurationChange(selectedZoomId, zoomIn, zoomOut)
 						}
+						faceBlurEnabled={editorState.faceBlurEnabled ?? false}
+						onFaceBlurChange={(enabled) => pushState({ faceBlurEnabled: enabled })}
+						bgRemovalEnabled={editorState.bgRemovalEnabled ?? false}
+						onBgRemovalChange={(enabled) => pushState({ bgRemovalEnabled: enabled })}
+						primaryAudioVolume={editorState.primaryAudioVolume ?? 1.0}
+						primaryAudioMuted={editorState.primaryAudioMuted ?? false}
+						onPrimaryAudioVolumeChange={(v) => updateState({ primaryAudioVolume: v })}
+						onPrimaryAudioMutedChange={(m) => pushState({ primaryAudioMuted: m })}
 					/>
+					{selectedAudioId && audioRegions.find((r) => r.id === selectedAudioId) && (
+						<div className="absolute inset-0 overflow-y-auto bg-[#111113] rounded-2xl border border-white/5 z-10">
+							<AudioSettingsPanel
+								region={audioRegions.find((r) => r.id === selectedAudioId)!}
+								onVolumeChange={handleAudioVolumeChange}
+								onDelete={handleAudioDelete}
+								onLabelChange={handleAudioLabelChange}
+								onEqualizerChange={handleAudioEqualizerChange}
+								onFadeChange={handleAudioFadeChange}
+							/>
+						</div>
+					)}
+					{selectedClipId && clipRegions.find((r) => r.id === selectedClipId) && (
+						<div className="absolute inset-0 overflow-y-auto bg-[#111113] rounded-2xl border border-white/5 z-10">
+							<ClipSettingsPanel
+								region={clipRegions.find((r) => r.id === selectedClipId)!}
+								isPrimary={false}
+								onDelete={handleClipDelete}
+								onLabelChange={handleClipLabelChange}
+								onTransitionChange={handleClipTransitionChange}
+								onClipUpdate={handleClipUpdate}
+								onExtractAudio={handleExtractAudio}
+							/>
+						</div>
+					)}
+					{showStickerPicker && (
+						<div className="absolute inset-0 overflow-y-auto bg-[#111113] rounded-2xl border border-white/5 z-20">
+							<StickerPickerPanel onAddSticker={(partial) => { handleAddSticker(partial); setShowStickerPicker(false); }} />
+						</div>
+					)}
+					{showTextPresets && (
+						<div className="absolute inset-0 overflow-y-auto bg-[#111113] rounded-2xl border border-white/5 z-20">
+							<TextPresetsPanel onApplyPreset={(partial) => { handleApplyTextPreset(partial); setShowTextPresets(false); }} />
+						</div>
+					)}
+					</div>
 				</div>
 			</div>
 

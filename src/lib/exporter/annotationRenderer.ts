@@ -1,4 +1,4 @@
-import { type AnnotationRegion, type ArrowDirection } from "@/components/video-editor/types";
+import { type AnnotationKeyframe, type AnnotationRegion, type ArrowDirection } from "@/components/video-editor/types";
 import {
 	applyMosaicToImageData,
 	getBlurOverlayColor,
@@ -201,6 +201,67 @@ function renderBlur(
 	ctx.restore();
 }
 
+function computeTextAnimation(
+	annotation: AnnotationRegion,
+	currentTimeMs: number,
+): { alpha: number; translateX: number; translateY: number; scale: number } {
+	const preset = annotation.textAnimation?.preset ?? "none";
+	if (preset === "none") return { alpha: 1, translateX: 0, translateY: 0, scale: 1 };
+
+	const durationMs = annotation.textAnimation?.durationMs ?? 500;
+	const regionDurationMs = annotation.endMs - annotation.startMs;
+	const relativeMs = currentTimeMs - annotation.startMs;
+
+	const inProgress = Math.min(1, relativeMs / durationMs);
+	const outProgress = Math.min(
+		1,
+		(regionDurationMs - relativeMs) / durationMs,
+	);
+	const easeIn = (t: number) => t * t;
+	const easeOut = (t: number) => 1 - (1 - t) * (1 - t);
+
+	switch (preset) {
+		case "fade-in":
+			return { alpha: easeIn(inProgress), translateX: 0, translateY: 0, scale: 1 };
+		case "fade-out":
+			return { alpha: easeOut(outProgress), translateX: 0, translateY: 0, scale: 1 };
+		case "fade-in-out": {
+			const alpha = Math.min(easeIn(inProgress), easeOut(outProgress));
+			return { alpha, translateX: 0, translateY: 0, scale: 1 };
+		}
+		case "slide-up": {
+			const offset = (1 - easeIn(inProgress)) * 40;
+			return { alpha: inProgress, translateX: 0, translateY: offset, scale: 1 };
+		}
+		case "slide-down": {
+			const offset = (1 - easeIn(inProgress)) * -40;
+			return { alpha: inProgress, translateX: 0, translateY: offset, scale: 1 };
+		}
+		case "slide-left": {
+			const offset = (1 - easeIn(inProgress)) * 40;
+			return { alpha: inProgress, translateX: offset, translateY: 0, scale: 1 };
+		}
+		case "slide-right": {
+			const offset = (1 - easeIn(inProgress)) * -40;
+			return { alpha: inProgress, translateX: offset, translateY: 0, scale: 1 };
+		}
+		case "scale-in": {
+			const s = 0.5 + 0.5 * easeIn(inProgress);
+			return { alpha: inProgress, translateX: 0, translateY: 0, scale: s };
+		}
+		case "bounce-in": {
+			const t = easeIn(inProgress);
+			const bounce = t < 0.8 ? t / 0.8 : 1 + Math.sin((t - 0.8) / 0.2 * Math.PI) * 0.1;
+			return { alpha: inProgress, translateX: 0, translateY: 0, scale: bounce };
+		}
+		case "typewriter":
+			// Handled separately in text rendering — just fade
+			return { alpha: inProgress, translateX: 0, translateY: 0, scale: 1 };
+		default:
+			return { alpha: 1, translateX: 0, translateY: 0, scale: 1 };
+	}
+}
+
 function renderText(
 	ctx: CanvasRenderingContext2D,
 	annotation: AnnotationRegion,
@@ -209,10 +270,24 @@ function renderText(
 	width: number,
 	height: number,
 	scaleFactor: number,
+	currentTimeMs?: number,
 ) {
 	const style = annotation.style;
 
+	const anim =
+		currentTimeMs !== undefined
+			? computeTextAnimation(annotation, currentTimeMs)
+			: { alpha: 1, translateX: 0, translateY: 0, scale: 1 };
+
 	ctx.save();
+	ctx.globalAlpha = anim.alpha;
+	if (anim.translateX !== 0 || anim.translateY !== 0 || anim.scale !== 1) {
+		const cx = x + width / 2;
+		const cy = y + height / 2;
+		ctx.translate(cx + anim.translateX, cy + anim.translateY);
+		ctx.scale(anim.scale, anim.scale);
+		ctx.translate(-cx, -cy);
+	}
 
 	// Clip text to annotation box bounds (matches editor's overflow: hidden)
 	ctx.beginPath();
@@ -327,6 +402,8 @@ async function renderImage(
 	y: number,
 	width: number,
 	height: number,
+	canvasWidth: number,
+	canvasHeight: number,
 ): Promise<void> {
 	if (!annotation.content || !annotation.content.startsWith("data:image")) {
 		return;
@@ -335,24 +412,56 @@ async function renderImage(
 	return new Promise((resolve) => {
 		const img = new Image();
 		img.onload = () => {
-			// Preserve aspect ratio - contain the image within the bounds
-			const imgAspect = img.width / img.height;
-			const boxAspect = width / height;
-
-			let drawWidth = width;
-			let drawHeight = height;
-			let drawX = x;
-			let drawY = y;
-
-			if (imgAspect > boxAspect) {
-				drawHeight = width / imgAspect;
-				drawY = y + (height - drawHeight) / 2;
+			if (annotation.imageFullFrame) {
+				const fit = annotation.imageFit ?? "cover";
+				const imgAspect = img.width / img.height;
+				const boxAspect = canvasWidth / canvasHeight;
+				let drawWidth: number;
+				let drawHeight: number;
+				let drawX = 0;
+				let drawY = 0;
+				if (fit === "fill") {
+					drawWidth = canvasWidth;
+					drawHeight = canvasHeight;
+				} else if (fit === "contain") {
+					if (imgAspect > boxAspect) {
+						drawWidth = canvasWidth;
+						drawHeight = canvasWidth / imgAspect;
+						drawY = (canvasHeight - drawHeight) / 2;
+					} else {
+						drawHeight = canvasHeight;
+						drawWidth = canvasHeight * imgAspect;
+						drawX = (canvasWidth - drawWidth) / 2;
+					}
+				} else {
+					// cover
+					if (imgAspect > boxAspect) {
+						drawHeight = canvasHeight;
+						drawWidth = canvasHeight * imgAspect;
+						drawX = (canvasWidth - drawWidth) / 2;
+					} else {
+						drawWidth = canvasWidth;
+						drawHeight = canvasWidth / imgAspect;
+						drawY = (canvasHeight - drawHeight) / 2;
+					}
+				}
+				ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
 			} else {
-				drawWidth = height * imgAspect;
-				drawX = x + (width - drawWidth) / 2;
+				const imgAspect = img.width / img.height;
+				const boxAspect = width / height;
+				let drawWidth = width;
+				let drawHeight = height;
+				let drawX = x;
+				let drawY = y;
+				if (imgAspect > boxAspect) {
+					drawHeight = width / imgAspect;
+					drawY = y + (height - drawHeight) / 2;
+				} else {
+					drawWidth = height * imgAspect;
+					drawX = x + (width - drawWidth) / 2;
+				}
+				ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
 			}
-
-			ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
 			resolve();
 		};
 		img.onerror = () => {
@@ -361,6 +470,198 @@ async function renderImage(
 		};
 		img.src = annotation.content;
 	});
+}
+
+async function renderGif(
+	ctx: CanvasRenderingContext2D,
+	annotation: AnnotationRegion,
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+	currentTimeMs: number,
+): Promise<void> {
+	const frames = annotation.gifFrames;
+	if (!frames || frames.length === 0) return;
+
+	const relativeMs = currentTimeMs - annotation.startMs;
+	let elapsed = relativeMs;
+	let frameIndex = 0;
+	for (let i = 0; i < frames.length; i++) {
+		if (elapsed < frames[i].delayMs) {
+			frameIndex = i;
+			break;
+		}
+		elapsed -= frames[i].delayMs;
+		if (i === frames.length - 1) {
+			const totalDelay = frames.reduce((s, f) => s + f.delayMs, 0);
+			if (totalDelay > 0) {
+				frameIndex = Math.floor((relativeMs % totalDelay) / (totalDelay / frames.length));
+				frameIndex = Math.max(0, Math.min(frames.length - 1, frameIndex));
+			}
+		}
+	}
+
+	const frame = frames[frameIndex];
+	await new Promise<void>((resolve) => {
+		const img = new Image();
+		img.onload = () => {
+			ctx.drawImage(img, x, y, width, height);
+			resolve();
+		};
+		img.onerror = () => resolve();
+		img.src = frame.dataUrl;
+	});
+}
+
+function renderDrawing(
+	ctx: CanvasRenderingContext2D,
+	annotation: AnnotationRegion,
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+	scaleFactor: number,
+): void {
+	const points = annotation.pathPoints;
+	if (!points || points.length < 2) return;
+
+	ctx.save();
+	ctx.strokeStyle = annotation.strokeColor ?? "#ff0000";
+	ctx.lineWidth = (annotation.strokeWidth ?? 4) * scaleFactor;
+	ctx.lineCap = "round";
+	ctx.lineJoin = "round";
+	ctx.beginPath();
+	ctx.moveTo(x + (points[0].x / 100) * width, y + (points[0].y / 100) * height);
+	for (let i = 1; i < points.length; i++) {
+		ctx.lineTo(x + (points[i].x / 100) * width, y + (points[i].y / 100) * height);
+	}
+	ctx.stroke();
+	ctx.restore();
+}
+
+function renderKaraokeText(
+	ctx: CanvasRenderingContext2D,
+	annotation: AnnotationRegion,
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+	scaleFactor: number,
+	currentTimeMs: number,
+) {
+	const style = annotation.style;
+	const wordTimings = annotation.wordTimings!;
+	const fontWeight = style.fontWeight === "bold" ? "bold" : "normal";
+	const fontStyle = style.fontStyle === "italic" ? "italic" : "normal";
+	const scaledFontSize = style.fontSize * scaleFactor;
+	ctx.font = `${fontStyle} ${fontWeight} ${scaledFontSize}px ${style.fontFamily}`;
+	ctx.textBaseline = "middle";
+
+	ctx.save();
+	ctx.beginPath();
+	ctx.rect(x, y, width, height);
+	ctx.clip();
+
+	const containerPadding = 8 * scaleFactor;
+	const baseY = y + height / 2;
+
+	const activeWord = wordTimings.find(
+		(wt) => currentTimeMs >= wt.startMs && currentTimeMs < wt.endMs,
+	);
+
+	const totalWidth = wordTimings.reduce((sum, wt) => sum + ctx.measureText(`${wt.word} `).width, 0);
+	const startOffset = (width - containerPadding * 2 - totalWidth) / 2;
+	let currentX = x + containerPadding + (startOffset > 0 ? startOffset : 0);
+
+	for (const wt of wordTimings) {
+		const isActive = activeWord === wt;
+		ctx.fillStyle = isActive ? "#FFD700" : style.color;
+		if (isActive) {
+			ctx.font = `${fontStyle} bold ${scaledFontSize * 1.1}px ${style.fontFamily}`;
+		} else {
+			ctx.font = `${fontStyle} ${fontWeight} ${scaledFontSize}px ${style.fontFamily}`;
+		}
+		ctx.textAlign = "left";
+		ctx.fillText(wt.word, currentX, baseY);
+		currentX += ctx.measureText(`${wt.word} `).width;
+	}
+
+	ctx.restore();
+}
+
+function catmullRomInterp(p0: number, p1: number, p2: number, p3: number, t: number): number {
+	return 0.5 * (
+		2 * p1 +
+		(-p0 + p2) * t +
+		(2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t +
+		(-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t
+	);
+}
+
+export function interpolateKeyframes(region: AnnotationRegion, currentTimeMs: number): AnnotationRegion {
+	const kfs = region.keyframes;
+	if (!kfs || kfs.length === 0) return region;
+
+	const sorted = [...kfs].sort((a, b) => a.timeMs - b.timeMs);
+
+	if (currentTimeMs <= sorted[0].timeMs) {
+		const kf = sorted[0];
+		return {
+			...region,
+			position: { ...region.position, ...(kf.properties.position ?? {}) },
+			size: { ...region.size, ...(kf.properties.size ?? {}) },
+			style: { ...region.style, ...(kf.properties.style ?? {}) },
+		};
+	}
+	if (currentTimeMs >= sorted[sorted.length - 1].timeMs) {
+		const kf = sorted[sorted.length - 1];
+		return {
+			...region,
+			position: { ...region.position, ...(kf.properties.position ?? {}) },
+			size: { ...region.size, ...(kf.properties.size ?? {}) },
+			style: { ...region.style, ...(kf.properties.style ?? {}) },
+		};
+	}
+
+	let i = 0;
+	for (let idx = 0; idx < sorted.length - 1; idx++) {
+		if (currentTimeMs >= sorted[idx].timeMs && currentTimeMs < sorted[idx + 1].timeMs) {
+			i = idx;
+			break;
+		}
+	}
+
+	const kA = sorted[i];
+	const kB = sorted[i + 1];
+	const t = (currentTimeMs - kA.timeMs) / (kB.timeMs - kA.timeMs);
+
+	const interp = (
+		getter: (kf: AnnotationKeyframe) => number | undefined,
+		fallback: number,
+	): number => {
+		const v0 = getter(sorted[Math.max(0, i - 1)]) ?? fallback;
+		const v1 = getter(kA) ?? fallback;
+		const v2 = getter(kB) ?? fallback;
+		const v3 = getter(sorted[Math.min(sorted.length - 1, i + 2)]) ?? fallback;
+		if (sorted.length >= 3) return catmullRomInterp(v0, v1, v2, v3, t);
+		return v1 + (v2 - v1) * t;
+	};
+
+	const px = interp((kf) => kf.properties.position?.x, region.position.x);
+	const py = interp((kf) => kf.properties.position?.y, region.position.y);
+	const sw = interp((kf) => kf.properties.size?.width, region.size.width);
+	const sh = interp((kf) => kf.properties.size?.height, region.size.height);
+
+	return {
+		...region,
+		position: { x: px, y: py },
+		size: { width: sw, height: sh },
+		style: {
+			...region.style,
+			...(kA.properties.style ?? {}),
+		},
+	};
 }
 
 export async function renderAnnotations(
@@ -376,10 +677,17 @@ export async function renderAnnotations(
 		(ann) => currentTimeMs >= ann.startMs && currentTimeMs < ann.endMs,
 	);
 
-	// Sort by z-index (lower first, so higher z-index draws on top)
-	const sortedAnnotations = [...activeAnnotations].sort((a, b) => a.zIndex - b.zIndex);
+	// Sort by z-index; full-frame images always render first (beneath everything)
+	const sortedAnnotations = [...activeAnnotations].sort((a, b) => {
+		const aFullFrame = a.type === "image" && a.imageFullFrame ? -1 : 0;
+		const bFullFrame = b.type === "image" && b.imageFullFrame ? -1 : 0;
+		return aFullFrame - bFullFrame || a.zIndex - b.zIndex;
+	});
 
-	for (const annotation of sortedAnnotations) {
+	for (const rawAnnotation of sortedAnnotations) {
+		const annotation = rawAnnotation.keyframes && rawAnnotation.keyframes.length > 0
+			? interpolateKeyframes(rawAnnotation, currentTimeMs)
+			: rawAnnotation;
 		const x = (annotation.position.x / 100) * canvasWidth;
 		const y = (annotation.position.y / 100) * canvasHeight;
 		const width = (annotation.size.width / 100) * canvasWidth;
@@ -387,11 +695,15 @@ export async function renderAnnotations(
 
 		switch (annotation.type) {
 			case "text":
-				renderText(ctx, annotation, x, y, width, height, scaleFactor);
+				if (annotation.wordTimings && annotation.wordTimings.length > 0) {
+					renderKaraokeText(ctx, annotation, x, y, width, height, scaleFactor, currentTimeMs);
+				} else {
+					renderText(ctx, annotation, x, y, width, height, scaleFactor, currentTimeMs);
+				}
 				break;
 
 			case "image":
-				await renderImage(ctx, annotation, x, y, width, height);
+				await renderImage(ctx, annotation, x, y, width, height, canvasWidth, canvasHeight);
 				break;
 
 			case "figure":
@@ -412,6 +724,14 @@ export async function renderAnnotations(
 
 			case "blur":
 				renderBlur(ctx, annotation, x, y, width, height, scaleFactor);
+				break;
+
+			case "gif":
+				await renderGif(ctx, annotation, x, y, width, height, currentTimeMs);
+				break;
+
+			case "drawing":
+				renderDrawing(ctx, annotation, x, y, width, height, scaleFactor);
 				break;
 		}
 	}

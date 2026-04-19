@@ -1,5 +1,6 @@
 import { WebDemuxer } from "web-demuxer";
-import type { SpeedRegion, TrimRegion } from "@/components/video-editor/types";
+import type { AudioRegion, SpeedRegion, TrimRegion } from "@/components/video-editor/types";
+import { toFileUrl } from "@/components/video-editor/projectPersistence";
 import type { VideoMuxer } from "./muxer";
 
 const AUDIO_BITRATE = 128_000;
@@ -13,6 +14,9 @@ export class AudioProcessor {
 	 * Audio export has two modes:
 	 * 1) no speed regions -> fast WebCodecs trim-only pipeline
 	 * 2) speed regions present -> pitch-preserving rendered timeline pipeline
+	 *
+	 * When audioRegions are provided, the primary audio and all imported audio
+	 * tracks are mixed down via OfflineAudioContext before encoding.
 	 */
 	async process(
 		demuxer: WebDemuxer,
@@ -21,6 +25,10 @@ export class AudioProcessor {
 		trimRegions?: TrimRegion[],
 		speedRegions?: SpeedRegion[],
 		readEndSec?: number,
+		audioRegions?: AudioRegion[],
+		totalOutputDurationMs?: number,
+		primaryAudioVolume?: number,
+		primaryAudioMuted?: boolean,
 	): Promise<void> {
 		const sortedTrims = trimRegions ? [...trimRegions].sort((a, b) => a.startMs - b.startMs) : [];
 		const sortedSpeedRegions = speedRegions
@@ -28,6 +36,21 @@ export class AudioProcessor {
 					.filter((region) => region.endMs - region.startMs > MIN_SPEED_REGION_DELTA_MS)
 					.sort((a, b) => a.startMs - b.startMs)
 			: [];
+
+		const validAudioRegions = (audioRegions ?? []).filter((r) => r.sourcePath && r.endMs > r.startMs);
+
+		if (validAudioRegions.length > 0 && totalOutputDurationMs && totalOutputDurationMs > 0) {
+			const primaryBlob = primaryAudioMuted
+				? null
+				: await this.renderPrimaryAudioBlob(videoUrl, sortedTrims, sortedSpeedRegions, totalOutputDurationMs);
+			if (this.cancelled) return;
+			const mixed = await this.mixAudioRegions(primaryBlob, validAudioRegions, totalOutputDurationMs, primaryAudioVolume ?? 1.0);
+			if (this.cancelled) return;
+			await this.muxRenderedAudioBlob(mixed, muxer);
+			return;
+		}
+
+		if (primaryAudioMuted) return;
 
 		// Speed edits must use timeline playback to preserve pitch
 		if (sortedSpeedRegions.length > 0) {
@@ -497,6 +520,219 @@ export class AudioProcessor {
 			}
 		}
 		return offset;
+	}
+
+	// Renders the primary video audio (with trims + speed) to a Blob.
+	private async renderPrimaryAudioBlob(
+		videoUrl: string,
+		sortedTrims: TrimRegion[],
+		sortedSpeedRegions: SpeedRegion[],
+		_totalOutputDurationMs: number,
+	): Promise<Blob | null> {
+		if (sortedSpeedRegions.length > 0) {
+			return this.renderPitchPreservedTimelineAudio(videoUrl, sortedTrims, sortedSpeedRegions);
+		}
+
+		// No speed regions: render primary audio via AudioContext capture
+		const media = document.createElement("audio");
+		media.src = videoUrl;
+		media.preload = "auto";
+
+		await this.waitForLoadedMetadata(media);
+		if (this.cancelled) return null;
+
+		const audioContext = new AudioContext();
+		const sourceNode = audioContext.createMediaElementSource(media);
+		const destinationNode = audioContext.createMediaStreamDestination();
+		sourceNode.connect(destinationNode);
+
+		const { recorder, recordedBlobPromise } = this.startAudioRecording(destinationNode.stream);
+
+		try {
+			if (audioContext.state === "suspended") await audioContext.resume();
+			await this.seekTo(media, 0);
+			await media.play();
+
+			await new Promise<void>((resolve) => {
+				const cleanup = () => {
+					media.removeEventListener("ended", onEnded);
+				};
+				const onEnded = () => { cleanup(); resolve(); };
+				media.addEventListener("ended", onEnded, { once: true });
+			});
+		} finally {
+			media.pause();
+			if (recorder.state !== "inactive") recorder.stop();
+			destinationNode.stream.getTracks().forEach((t) => t.stop());
+			sourceNode.disconnect();
+			destinationNode.disconnect();
+			await audioContext.close();
+			media.src = "";
+			media.load();
+		}
+
+		return recordedBlobPromise;
+	}
+
+	// Mixes the primary audio blob with imported AudioRegions using OfflineAudioContext.
+	private async mixAudioRegions(
+		primaryBlob: Blob | null,
+		audioRegions: AudioRegion[],
+		totalOutputDurationMs: number,
+		primaryAudioVolume = 1.0,
+	): Promise<Blob> {
+		const sampleRate = 48000;
+		const channels = 2;
+		const totalSamples = Math.ceil((totalOutputDurationMs / 1000) * sampleRate);
+		const offlineCtx = new OfflineAudioContext(channels, totalSamples, sampleRate);
+
+		const decodeBlob = async (blob: Blob): Promise<AudioBuffer | null> => {
+			const arrayBuffer = await blob.arrayBuffer();
+			try {
+				const decodeCtx = new AudioContext({ sampleRate });
+				const buffer = await decodeCtx.decodeAudioData(arrayBuffer);
+				await decodeCtx.close();
+				return buffer;
+			} catch {
+				return null;
+			}
+		};
+
+		const decodeUrl = async (url: string): Promise<AudioBuffer | null> => {
+			try {
+				const response = await fetch(url);
+				const arrayBuffer = await response.arrayBuffer();
+				const decodeCtx = new AudioContext({ sampleRate });
+				const buffer = await decodeCtx.decodeAudioData(arrayBuffer);
+				await decodeCtx.close();
+				return buffer;
+			} catch {
+				return null;
+			}
+		};
+
+		// Place primary audio at time 0
+		if (primaryBlob) {
+			const primaryBuffer = await decodeBlob(primaryBlob);
+			if (primaryBuffer) {
+				const primaryGain = offlineCtx.createGain();
+				primaryGain.gain.value = Math.max(0, Math.min(1, primaryAudioVolume));
+				primaryGain.connect(offlineCtx.destination);
+				const source = offlineCtx.createBufferSource();
+				source.buffer = primaryBuffer;
+				source.connect(primaryGain);
+				source.start(0);
+			}
+		}
+
+		// Place each imported audio region
+		for (const region of audioRegions) {
+			if (this.cancelled) break;
+			const fileUrl = region.sourcePath.startsWith("file://")
+				? region.sourcePath
+				: toFileUrl(region.sourcePath);
+			const buffer = await decodeUrl(fileUrl);
+			if (!buffer) continue;
+
+			const gainNode = offlineCtx.createGain();
+			gainNode.gain.value = Math.max(0, Math.min(1, region.volume));
+
+			const startTimeSec = region.startMs / 1000;
+			const endTimeSec = region.endMs / 1000;
+
+			if (region.fadeInMs && region.fadeInMs > 0) {
+				gainNode.gain.setValueAtTime(0, startTimeSec);
+				gainNode.gain.linearRampToValueAtTime(region.volume, startTimeSec + region.fadeInMs / 1000);
+			}
+			if (region.fadeOutMs && region.fadeOutMs > 0) {
+				gainNode.gain.setValueAtTime(region.volume, endTimeSec - region.fadeOutMs / 1000);
+				gainNode.gain.linearRampToValueAtTime(0, endTimeSec);
+			}
+
+			let lastNode: AudioNode = gainNode;
+
+			if (region.equalizer) {
+				const eq = region.equalizer;
+
+				const lowShelf = offlineCtx.createBiquadFilter();
+				lowShelf.type = "lowshelf";
+				lowShelf.frequency.value = 200;
+				lowShelf.gain.value = eq.low;
+				gainNode.connect(lowShelf);
+
+				const peaking = offlineCtx.createBiquadFilter();
+				peaking.type = "peaking";
+				peaking.frequency.value = 1000;
+				peaking.Q.value = 1;
+				peaking.gain.value = eq.mid;
+				lowShelf.connect(peaking);
+
+				const highShelf = offlineCtx.createBiquadFilter();
+				highShelf.type = "highshelf";
+				highShelf.frequency.value = 4000;
+				highShelf.gain.value = eq.high;
+				peaking.connect(highShelf);
+
+				lastNode = highShelf;
+			}
+
+			lastNode.connect(offlineCtx.destination);
+
+			const source = offlineCtx.createBufferSource();
+			source.buffer = buffer;
+			source.connect(gainNode);
+
+			const startOffsetSec = region.sourceOffsetMs / 1000;
+			const durationSec = (region.endMs - region.startMs) / 1000;
+			source.start(startTimeSec, startOffsetSec, durationSec);
+		}
+
+		const renderedBuffer = await offlineCtx.startRendering();
+
+		// Convert AudioBuffer to WAV Blob
+		const wavBlob = this.audioBufferToWavBlob(renderedBuffer);
+		return wavBlob;
+	}
+
+	private audioBufferToWavBlob(buffer: AudioBuffer): Blob {
+		const numChannels = buffer.numberOfChannels;
+		const sampleRate = buffer.sampleRate;
+		const numSamples = buffer.length;
+		const bytesPerSample = 2; // 16-bit PCM
+		const dataSize = numSamples * numChannels * bytesPerSample;
+		const fileSize = 44 + dataSize;
+
+		const arrayBuffer = new ArrayBuffer(fileSize);
+		const view = new DataView(arrayBuffer);
+
+		const writeStr = (offset: number, str: string) => {
+			for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+		};
+
+		writeStr(0, "RIFF");
+		view.setUint32(4, fileSize - 8, true);
+		writeStr(8, "WAVE");
+		writeStr(12, "fmt ");
+		view.setUint32(16, 16, true);
+		view.setUint16(20, 1, true); // PCM
+		view.setUint16(22, numChannels, true);
+		view.setUint32(24, sampleRate, true);
+		view.setUint32(28, sampleRate * numChannels * bytesPerSample, true);
+		view.setUint16(32, numChannels * bytesPerSample, true);
+		view.setUint16(34, 16, true);
+		writeStr(36, "data");
+		view.setUint32(40, dataSize, true);
+
+		let offset = 44;
+		for (let i = 0; i < numSamples; i++) {
+			for (let ch = 0; ch < numChannels; ch++) {
+				const sample = Math.max(-1, Math.min(1, buffer.getChannelData(ch)[i]));
+				view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+				offset += 2;
+			}
+		}
+
+		return new Blob([arrayBuffer], { type: "audio/wav" });
 	}
 
 	cancel(): void {

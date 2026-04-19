@@ -30,7 +30,7 @@ export interface VideoFrameData {
 export type ExportQuality = "medium" | "good" | "source";
 
 // GIF Export Types
-export type ExportFormat = "mp4" | "gif";
+export type ExportFormat = "mp4" | "gif" | "webm";
 
 export type GifFrameRate = 15 | 20 | 25 | 30;
 
