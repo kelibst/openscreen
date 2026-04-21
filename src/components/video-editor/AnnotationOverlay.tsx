@@ -17,6 +17,66 @@ import {
 } from "./types";
 
 const FREEHAND_POINT_THRESHOLD = 1;
+
+// ── Text animation (mirrors annotationRenderer.ts computeTextAnimation exactly) ──
+
+function computeTextAnimation(
+	annotation: AnnotationRegion,
+	currentTimeMs: number,
+): { alpha: number; translateX: number; translateY: number; scale: number } {
+	const preset = annotation.textAnimation?.preset ?? "none";
+	if (preset === "none") return { alpha: 1, translateX: 0, translateY: 0, scale: 1 };
+
+	const durationMs = annotation.textAnimation?.durationMs ?? 500;
+	const regionDurationMs = annotation.endMs - annotation.startMs;
+	const relativeMs = currentTimeMs - annotation.startMs;
+
+	const inProgress = Math.min(1, relativeMs / durationMs);
+	const outProgress = Math.min(1, (regionDurationMs - relativeMs) / durationMs);
+	const easeIn = (t: number) => t * t;
+	const easeOut = (t: number) => 1 - (1 - t) * (1 - t);
+
+	switch (preset) {
+		case "fade-in":
+			return { alpha: easeIn(inProgress), translateX: 0, translateY: 0, scale: 1 };
+		case "fade-out":
+			return { alpha: easeOut(outProgress), translateX: 0, translateY: 0, scale: 1 };
+		case "fade-in-out": {
+			const alpha = Math.min(easeIn(inProgress), easeOut(outProgress));
+			return { alpha, translateX: 0, translateY: 0, scale: 1 };
+		}
+		case "slide-up": {
+			const offset = (1 - easeIn(inProgress)) * 40;
+			return { alpha: inProgress, translateX: 0, translateY: offset, scale: 1 };
+		}
+		case "slide-down": {
+			const offset = (1 - easeIn(inProgress)) * -40;
+			return { alpha: inProgress, translateX: 0, translateY: offset, scale: 1 };
+		}
+		case "slide-left": {
+			const offset = (1 - easeIn(inProgress)) * 40;
+			return { alpha: inProgress, translateX: offset, translateY: 0, scale: 1 };
+		}
+		case "slide-right": {
+			const offset = (1 - easeIn(inProgress)) * -40;
+			return { alpha: inProgress, translateX: offset, translateY: 0, scale: 1 };
+		}
+		case "scale-in": {
+			const s = 0.5 + 0.5 * easeIn(inProgress);
+			return { alpha: inProgress, translateX: 0, translateY: 0, scale: s };
+		}
+		case "bounce-in": {
+			const t = easeIn(inProgress);
+			const bounce =
+				t < 0.8 ? t / 0.8 : 1 + Math.sin(((t - 0.8) / 0.2) * Math.PI) * 0.1;
+			return { alpha: inProgress, translateX: 0, translateY: 0, scale: bounce };
+		}
+		case "typewriter":
+			return { alpha: inProgress, translateX: 0, translateY: 0, scale: 1 };
+		default:
+			return { alpha: 1, translateX: 0, translateY: 0, scale: 1 };
+	}
+}
 type PreviewCanvasSource = {
 	width: number;
 	height: number;
@@ -639,6 +699,29 @@ export function AnnotationOverlay({
 		});
 	};
 
+	// ── Compute live animation state for text annotations ────────────────────
+	const animState =
+		annotation.type === "text" &&
+		annotation.textAnimation &&
+		annotation.textAnimation.preset !== "none" &&
+		currentTimeMs !== undefined
+			? computeTextAnimation(annotation, currentTimeMs)
+			: null;
+
+	const animStyle: CSSProperties | undefined = animState
+		? {
+				opacity: animState.alpha,
+				transform:
+					animState.translateX !== 0 ||
+					animState.translateY !== 0 ||
+					animState.scale !== 1
+						? `translate(${animState.translateX}px, ${animState.translateY}px) scale(${animState.scale})`
+						: undefined,
+				transformOrigin: "center center",
+				pointerEvents: "none" as const,
+		  }
+		: undefined;
+
 	// Full-frame images render as a static background layer, not a draggable Rnd
 	if (annotation.type === "image" && annotation.imageFullFrame) {
 		const fit = annotation.imageFit ?? "cover";
@@ -789,6 +872,7 @@ export function AnnotationOverlay({
 					annotation.type === "blur" && "bg-transparent",
 					isSelected && annotation.type !== "blur" && "shadow-lg",
 				)}
+				style={animStyle}
 			>
 				{renderContent()}
 			</div>

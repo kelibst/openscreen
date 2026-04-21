@@ -1,7 +1,7 @@
 import type { Span } from "dnd-timeline";
 import { useItem, useTimelineContext } from "dnd-timeline";
 import { Film, Gauge, Lock, MessageSquare, Music, Scissors, ZoomIn } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import {
 	DEFAULT_ZOOM_IN_MS,
@@ -11,6 +11,13 @@ import {
 import glassStyles from "./ItemGlass.module.css";
 import { thumbnailCache } from "./ThumbnailCache";
 import { waveformCache } from "./WaveformCache";
+
+export interface ItemContextAction {
+	label: string;
+	icon?: string;
+	danger?: boolean;
+	onClick: () => void;
+}
 
 interface ItemProps {
 	id: string;
@@ -30,6 +37,7 @@ interface ItemProps {
 	disableDrag?: boolean;
 	sourcePath?: string;
 	sourceOffsetMs?: number;
+	contextActions?: ItemContextAction[];
 }
 
 // Map zoom depth to multiplier labels
@@ -70,12 +78,32 @@ export default function Item({
 	onZoomDurationChange,
 	sourcePath,
 	sourceOffsetMs = 0,
+	contextActions,
 }: ItemProps) {
 	const { pixelsToValue } = useTimelineContext();
 
 	const [waveform, setWaveform] = useState<Float32Array | null>(null);
 	const [thumbnails, setThumbnails] = useState<string[]>([]);
 	const waveformCanvasRef = useRef<HTMLCanvasElement>(null);
+
+	// Context menu state
+	const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+
+	const handleContextMenu = useCallback((e: React.MouseEvent) => {
+		if (!contextActions?.length) return;
+		e.preventDefault();
+		e.stopPropagation();
+		onSelect?.();
+		setCtxMenu({ x: e.clientX, y: e.clientY });
+	}, [contextActions, onSelect]);
+
+	// Close context menu on outside click
+	useEffect(() => {
+		if (!ctxMenu) return;
+		const close = () => setCtxMenu(null);
+		window.addEventListener("pointerdown", close, { capture: true, once: true });
+		return () => window.removeEventListener("pointerdown", close, { capture: true });
+	}, [ctxMenu]);
 
 	const durationMs = span.end - span.start;
 
@@ -188,6 +216,7 @@ export default function Item({
 			{...(disableDrag ? {} : listeners)}
 			{...attributes}
 			onPointerDownCapture={() => onSelect?.()}
+			onContextMenu={handleContextMenu}
 			className="group"
 		>
 			<div style={{ ...itemContentStyle, minWidth: 24 }}>
@@ -214,7 +243,7 @@ export default function Item({
 						/>
 					)}
 
-					{isClip && !isPrimary && thumbnails.length > 0 && (
+					{isClip && thumbnails.length > 0 && (
 						<div className="absolute inset-0 flex overflow-hidden pointer-events-none rounded-[7px]">
 							{thumbnails.map((src, i) => (
 								<img

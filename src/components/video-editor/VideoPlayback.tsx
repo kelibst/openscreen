@@ -1,6 +1,7 @@
 import {
 	Application,
 	BlurFilter,
+	ColorMatrixFilter,
 	Container,
 	Graphics,
 	Sprite,
@@ -38,6 +39,7 @@ import {
 	type AnnotationRegion,
 	type BlurData,
 	type ClipRegion,
+	type ColorGrading,
 	type SpeedRegion,
 	type TrimRegion,
 	ZOOM_DEPTH_SCALES,
@@ -119,6 +121,7 @@ interface VideoPlaybackProps {
 	bgRemovalEnabled?: boolean;
 	onAddKeyframe?: (id: string, keyframe: AnnotationKeyframe) => void;
 	onKeyframePositionChange?: (id: string, keyframeIndex: number, position: { x: number; y: number }) => void;
+	colorGrading?: ColorGrading | null;
 }
 
 export interface VideoPlaybackRef {
@@ -183,6 +186,7 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			bgRemovalEnabled = false,
 			onAddKeyframe,
 			onKeyframePositionChange,
+			colorGrading,
 		},
 		ref,
 	) => {
@@ -224,6 +228,7 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 		});
 		const blurFilterRef = useRef<BlurFilter | null>(null);
 		const motionBlurFilterRef = useRef<MotionBlurFilter | null>(null);
+		const colorMatrixFilterRef = useRef<ColorMatrixFilter | null>(null);
 		const isDraggingFocusRef = useRef(false);
 		const isDraggingWebcamRef = useRef(false);
 		const webcamDragOffsetRef = useRef({ dx: 0, dy: 0 });
@@ -553,6 +558,62 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			motionBlurAmountRef.current = motionBlurAmount;
 		}, [motionBlurAmount]);
 
+		// Task E — Color grading live preview: apply ColorMatrixFilter to the video container
+		useEffect(() => {
+			const f = colorMatrixFilterRef.current;
+			if (!f) return;
+
+			f.reset();
+
+			if (!colorGrading) return;
+
+			// Apply preset first (mirrors frameRenderer.ts applyColorGrading)
+			if (colorGrading.preset && colorGrading.preset !== "none") {
+				switch (colorGrading.preset) {
+					case "vivid":
+						f.saturate(0.5, false);
+						f.contrast(0.1, false);
+						f.brightness(0.05, false);
+						break;
+					case "matte":
+						f.contrast(-0.1, false);
+						f.saturate(-0.2, false);
+						f.brightness(0.1, false);
+						break;
+					case "cinematic":
+						f.contrast(0.2, false);
+						f.saturate(-0.1, false);
+						f.brightness(-0.05, false);
+						break;
+					case "warm":
+						f.hue(15, false);
+						f.saturate(0.1, false);
+						f.brightness(0.05, false);
+						break;
+					case "cool":
+						f.hue(-15, false);
+						f.saturate(0.1, false);
+						f.brightness(-0.05, false);
+						break;
+					case "vintage":
+						f.saturate(-0.3, false);
+						f.contrast(0.1, false);
+						f.hue(10, false);
+						break;
+					case "noir":
+						f.desaturate();
+						f.contrast(0.2, false);
+						break;
+				}
+			}
+
+			// Apply manual per-channel adjustments (additive on top of preset)
+			if (colorGrading.brightness !== 0) f.brightness(1 + colorGrading.brightness, false);
+			if (colorGrading.contrast !== 0) f.contrast(colorGrading.contrast, false);
+			if (colorGrading.saturation !== 0) f.saturate(colorGrading.saturation, false);
+			if (colorGrading.hue !== 0) f.hue(colorGrading.hue, false);
+		}, [colorGrading]);
+
 		useEffect(() => {
 			onTimeUpdateRef.current = onTimeUpdate;
 		}, [onTimeUpdate]);
@@ -835,7 +896,9 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			blurFilter.resolution = app.renderer.resolution;
 			blurFilter.blur = 0;
 			const motionBlurFilter = new MotionBlurFilter([0, 0], 5, 0);
-			videoContainer.filters = [blurFilter, motionBlurFilter];
+			const colorMatrixFilter = new ColorMatrixFilter();
+			colorMatrixFilterRef.current = colorMatrixFilter;
+			videoContainer.filters = [blurFilter, motionBlurFilter, colorMatrixFilter];
 			blurFilterRef.current = blurFilter;
 			motionBlurFilterRef.current = motionBlurFilter;
 
@@ -909,6 +972,10 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 				if (motionBlurFilterRef.current) {
 					motionBlurFilterRef.current.destroy();
 					motionBlurFilterRef.current = null;
+				}
+				if (colorMatrixFilterRef.current) {
+					colorMatrixFilterRef.current.destroy();
+					colorMatrixFilterRef.current = null;
 				}
 				videoTexture.destroy(true);
 

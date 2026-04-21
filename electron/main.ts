@@ -15,7 +15,7 @@ import {
 } from "electron";
 import { mainT, setMainLocale } from "./i18n";
 import { registerIpcHandlers } from "./ipc/handlers";
-import { createEditorWindow, createHudOverlayWindow, createSourceSelectorWindow } from "./windows";
+import { createEditorWindow, createHomeWindow, createHudOverlayWindow, createSourceSelectorWindow, getHomeWindow } from "./windows";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isLinux = process.platform === "linux";
@@ -78,19 +78,25 @@ const defaultTrayIcon = isLinux
 const recordingTrayIcon = getTrayIcon("rec-button.png", trayIconSize);
 
 function createWindow() {
-	createHudOverlayWindow();
+	createHomeWindow();
 }
 
 function showMainWindow() {
+	// Prefer the editor window if it's open
 	if (mainWindow && !mainWindow.isDestroyed()) {
-		if (mainWindow.isMinimized()) {
-			mainWindow.restore();
-		}
+		if (mainWindow.isMinimized()) mainWindow.restore();
 		mainWindow.show();
 		mainWindow.focus();
 		return;
 	}
-
+	// Fall back to the home window
+	const hw = getHomeWindow();
+	if (hw && !hw.isDestroyed()) {
+		if (hw.isMinimized()) hw.restore();
+		hw.show();
+		hw.focus();
+		return;
+	}
 	createWindow();
 }
 
@@ -367,10 +373,21 @@ app.on("window-all-closed", () => {
 });
 
 app.on("activate", () => {
-	// On OS X it's common to re-create a window in the app when the
-	// dock icon is clicked and there are no other windows open.
 	if (BrowserWindow.getAllWindows().length === 0) {
 		createWindow();
+	} else {
+		showMainWindow();
+	}
+});
+
+// macOS: open file by double-clicking or dragging onto the dock icon.
+// Store the path so the whenReady block or IPC handler can consume it.
+let pendingOpenFilePath: string | null = null;
+app.on("open-file", (event, filePath) => {
+	event.preventDefault();
+	pendingOpenFilePath = filePath;
+	if (app.isReady() && mainWindow && !mainWindow.isDestroyed()) {
+		mainWindow.webContents.send("open-file-in-editor", filePath);
 	}
 });
 
@@ -436,5 +453,21 @@ app.whenReady().then(async () => {
 		},
 		switchToHudWrapper,
 	);
-	createWindow();
+	// On cold launch: if a file was passed via argv (Windows/Linux drag-onto-exe),
+	// handle it via IPC after the editor is up. Otherwise show the home screen.
+	const argvFile = process.argv.slice(app.isPackaged ? 1 : 2).find((a) => {
+		const ext = a.split(".").pop()?.toLowerCase() ?? "";
+		return ["mp4", "mov", "webm", "avi", "mkv", "openscreen"].includes(ext);
+	});
+	const startFile = pendingOpenFilePath ?? argvFile ?? null;
+
+	if (startFile) {
+		// Delegate to the IPC handler which handles approval + session setup
+		createEditorWindowWrapper();
+		mainWindow?.webContents.once("did-finish-load", () => {
+			mainWindow?.webContents.send("open-file-in-editor", startFile);
+		});
+	} else {
+		createHomeWindow();
+	}
 });
